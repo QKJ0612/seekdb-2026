@@ -17,56 +17,96 @@ my %map;
 my %other_map;
 my $last_errno = 0;
 my $error_count=0;
-my $print_error_cause="\"Internal Error\"";
-my $print_error_solution="\"Contact OceanBase Support\"";
 
 sub store_error
 {
-  my ($target_map, $name, $ob_errno, $mysql_errno, $sqlstate, $str_error, $str_user_error, $cause, $solution) = @_;
-  $cause = $print_error_cause if (!defined $cause);
-  $solution = $print_error_solution if (!defined $solution);
-  my $entry = [$ob_errno, $mysql_errno, $sqlstate, $str_error, $str_user_error, "$name", $cause, $solution];
+  my ($target_map, $name, $ob_errno, $mysql_errno, $sqlstate, $str_error, $str_user_error) = @_;
+  my $entry = [$ob_errno, $mysql_errno, $sqlstate, $str_error, $str_user_error, "$name"];
   $target_map->{$name} = $entry;
   $map{$name} = $entry;
   $last_errno = $ob_errno if ($ob_errno < $last_errno);
   return ($ob_errno, $sqlstate, $str_error);
 }
 
+
+# Split a DEFINE_* argument list at top-level commas only. Messages may be C
+# string-literal sequences (e.g. "x=%" PRId64 " us") and may contain commas
+# inside the quoted parts.
+sub split_args
+{
+  my ($text) = @_;
+  my @args;
+  my $cur = "";
+  my $depth = 0;
+  my $in_str = 0;
+  my $escaped = 0;
+  for my $ch (split //, $text) {
+    if ($in_str) {
+      $cur .= $ch;
+      if ($escaped) {
+        $escaped = 0;
+      } elsif ($ch eq "\\") {
+        $escaped = 1;
+      } elsif ($ch eq "\"") {
+        $in_str = 0;
+      }
+    } elsif ($ch eq "\"") {
+      $in_str = 1;
+      $cur .= $ch;
+    } elsif ($ch eq "(") {
+      ++$depth;
+      $cur .= $ch;
+    } elsif ($ch eq ")") {
+      --$depth;
+      $cur .= $ch;
+    } elsif ($ch eq "," && 0 == $depth) {
+      push @args, $cur;
+      $cur = "";
+    } else {
+      $cur .= $ch;
+    }
+  }
+  push @args, $cur if length($cur);
+  for my $arg (@args) {
+    $arg =~ s/^\s+//;
+    $arg =~ s/\s+$//;
+  }
+  return @args;
+}
+
 while(<$fh>) {
   my $error_msg;
   my $sqlstate;
   my $error_code;
-
-  if (/^DEFINE_ERROR\(([^,]+),\s*([^,]*),\s*([^,]*),\s*([^,]*),\s*("[^"]*"),\s*("[^"]*"),\s*("[^"]*")/) {
-    ++$error_count;
-    ($error_code, $sqlstate, $error_msg) = store_error(\%map_share, $1, $2, $3, $4, $5, $5, $6, $7);
-  } elsif (/^DEFINE_ERROR\(([^,]+),\s*([^,]*),\s*([^,]*),\s*([^,]*),\s*("[^"]*")/) {
-    ++$error_count;
-    ($error_code, $sqlstate, $error_msg) = store_error(\%map_share, $1, $2, $3, $4, $5, $5);
-  } elsif (/^DEFINE_ERROR_EXT\(([^,]+),\s*([^,]*),\s*([^,]*),\s*([^,]*),\s*("[^"]*"),\s*("[^"]*"),\s*("[^"]*"),\s*("[^"]*")/) {
-    ++$error_count;
-    ($error_code, $sqlstate, $error_msg) = store_error(\%map_share, $1, $2, $3, $4, $5, $6, $7, $8);
-  } elsif (/^DEFINE_ERROR_EXT\(([^,]+),\s*([^,]*),\s*([^,]*),\s*([^,]*),\s*("[^"]*"),\s*("[^"]*")/) {
-    ++$error_count;
-    ($error_code, $sqlstate, $error_msg) = store_error(\%map_share, $1, $2, $3, $4, $5, $6);
-  } elsif (/^DEFINE_OTHER_MSG_FMT\(([^,]+),\s*([^,]*),\s*("[^"]*")\s*,\s*("[^"]*")/) {
-    $other_map_share{$1} = [$2, $3, $4];
-    $other_map{$1} = [$2, $3, $4];
-  } elsif (/^DEFINE_ERROR_DEP\(([^,]+),\s*([^,]*),\s*([^,]*),\s*([^,]*),\s*("[^"]*"),\s*("[^"]*"),\s*("[^"]*")/) {
-    ++$error_count;
-    ($error_code, $sqlstate, $error_msg) = store_error(\%map_deps, $1, $2, $3, $4, $5, $5, $6, $7);
-  } elsif (/^DEFINE_ERROR_DEP\(([^,]+),\s*([^,]*),\s*([^,]*),\s*([^,]*),\s*("[^"]*")/) {
-    ++$error_count;
-    ($error_code, $sqlstate, $error_msg) = store_error(\%map_deps, $1, $2, $3, $4, $5, $5);
-  } elsif (/^DEFINE_ERROR_EXT_DEP\(([^,]+),\s*([^,]*),\s*([^,]*),\s*([^,]*),\s*("[^"]*"),\s*("[^"]*"),\s*("[^"]*"),\s*("[^"]*")/) {
-    ++$error_count;
-    ($error_code, $sqlstate, $error_msg) = store_error(\%map_deps, $1, $2, $3, $4, $5, $6, $7, $8);
-  } elsif (/^DEFINE_ERROR_EXT_DEP\(([^,]+),\s*([^,]*),\s*([^,]*),\s*([^,]*),\s*("[^"]*"),\s*("[^"]*")/) {
-    ++$error_count;
-    ($error_code, $sqlstate, $error_msg) = store_error(\%map_deps, $1, $2, $3, $4, $5, $6);
-  } elsif (/^DEFINE_OTHER_MSG_FMT_DEP\(([^,]+),\s*([^,]*),\s*("[^"]*")\s*,\s*("[^"]*")/) {
-    $other_map_deps{$1} = [$2, $3, $4];
-    $other_map{$1} = [$2, $3, $4];
+  my $line = $_;
+  if ($line =~ /^(DEFINE_[A-Z_]+)\((.*)$/) {
+    my $macro = $1;
+    my $raw_args = $2;
+    # Some historical lines carry a double ';' or omit the closing ')'.
+    $raw_args =~ s/\)\s*;*\s*$//;
+    $raw_args =~ s/;*\s*$//;
+    my @args = split_args($raw_args);
+    if ("DEFINE_ERROR" eq $macro && scalar(@args) >= 5) {
+      ++$error_count;
+      ($error_code, $sqlstate, $error_msg) = store_error(\%map_share, $args[0], $args[1], $args[2], $args[3], $args[4], $args[4]);
+    } elsif ("DEFINE_ERROR_EXT" eq $macro && scalar(@args) >= 6) {
+      ++$error_count;
+      ($error_code, $sqlstate, $error_msg) = store_error(\%map_share, $args[0], $args[1], $args[2], $args[3], $args[4], $args[5]);
+    } elsif ("DEFINE_OTHER_MSG_FMT" eq $macro && scalar(@args) >= 4) {
+      $other_map_share{$args[0]} = [$args[1], $args[2], $args[3]];
+      $other_map{$args[0]} = [$args[1], $args[2], $args[3]];
+    } elsif ("DEFINE_ERROR_DEP" eq $macro && scalar(@args) >= 5) {
+      ++$error_count;
+      ($error_code, $sqlstate, $error_msg) = store_error(\%map_deps, $args[0], $args[1], $args[2], $args[3], $args[4], $args[4]);
+    } elsif ("DEFINE_ERROR_EXT_DEP" eq $macro && scalar(@args) >= 6) {
+      ++$error_count;
+      ($error_code, $sqlstate, $error_msg) = store_error(\%map_deps, $args[0], $args[1], $args[2], $args[3], $args[4], $args[5]);
+    } elsif ("DEFINE_OTHER_MSG_FMT_DEP" eq $macro && scalar(@args) >= 4) {
+      $other_map_deps{$args[0]} = [$args[1], $args[2], $args[3]];
+      $other_map{$args[0]} = [$args[1], $args[2], $args[3]];
+    } elsif ($macro =~ /^DEFINE_/) {
+      print "WARN: unsupported args for $macro: $line";
+    }
   }
   if (defined $error_code) {
     print "WARN: undefined SQLSTATE for $1\n" if ($sqlstate eq "\"\"");
@@ -104,7 +144,6 @@ my @errors_deps = map {$_->[0]} @sorted_deps;
 my @pairs = map {[$_, $map{$_}->[0] ]} keys %map;
 my @sorted = sort {$b->[1] <=> $a->[1]} @pairs;
 my @errors = map {$_->[0]} @sorted;
-my @errnos = reverse sort { $a <=> $b } map {$map{$_}->[0]} keys %map;
 
 # generate share/ob_errno.h
 open my $fh_header, '>', "ob_errno.h";
@@ -133,6 +172,7 @@ print $fh_header '
 #ifndef OCEANBASE_LIB_OB_ERRNO_H_
 #define OCEANBASE_LIB_OB_ERRNO_H_
 #include <stdint.h>
+#include <inttypes.h>
 #include "share/mysql_errno.h"
 #include "lib/ob_errno.h"
 
@@ -170,13 +210,10 @@ constexpr int OB_ERR_SQL_END = -5999;
   foreach my $oberr (sort keys %other_map){
     print $fh_header "#define ${oberr}__USER_ERROR_MSG $other_map{$oberr}->[1]\n";
   }
-  print $fh_header "\nextern int g_all_ob_errnos[${\(scalar @errnos)}];";
 
   print $fh_header '
 
   const char *ob_error_name(const int oberr);
-  const char* ob_error_cause(const int oberr);
-  const char* ob_error_solution(const int oberr);
 
   int ob_mysql_errno(const int oberr);
   int ob_mysql_errno_with_check(const int oberr);
@@ -266,30 +303,14 @@ print $fh_cpp '
 
 #define USING_LOG_PREFIX LIB_MYSQLC
 
-// DO NOT DELETE `#include <iostream>` !!!
-// fix: ob_error.cpp file requires at least 20g memory for release(-O2) compilation
-// and will jam when asan turned on
-// it can be solved by introducing <iostream> header file currently
-// TODO: it is clang bug and the specific reason to be further located
-// issue: 
-#include <iostream>
-
+#include <inttypes.h>
 #include "ob_errno.h"
-#ifndef __ERROR_CODE_PARSER_
 #include "ob_define.h"
-#include "lib/utility/ob_edit_distance.h"
-#else
-#define OB_LIKELY
-#define OB_UNLIKELY
-#include <string.h>
-#endif
 using namespace oceanbase::common;
 
 struct _error {
   public:
     const char *error_name;
-    const char *error_cause;
-    const char *error_solution;
     int         mysql_errno;
     const char *sqlstate;
     const char *str_error;
@@ -303,8 +324,6 @@ for my $oberr (@errors) {
   if (0 > $map{$oberr}->[0]) {
     my $err = "static const _error _error_$oberr = {
       .error_name            = \"$map{$oberr}->[5]\",
-      .error_cause           = $map{$oberr}->[6],
-      .error_solution        = $map{$oberr}->[7],
       .mysql_errno           = $map{$oberr}->[1],
       .sqlstate              = $map{$oberr}->[2],
       .str_error             = $map{$oberr}->[3],
@@ -339,22 +358,11 @@ inline const _error *get_error(int index)
   return _errors[index];
 }
 
-int get_mysql_errno(int index)
-{
-  return get_error(index)->mysql_errno;
-}
-
-const char* get_mysql_str_error(int index)
-{
-  return get_error(index)->str_error;
-}
-
 namespace oceanbase
 {
 namespace common
 {
 ';
-print $fh_cpp "int g_all_ob_errnos[${\(scalar @errnos)}] = {" . join(", ", @errnos) . "};";
 
 print $fh_cpp '
   const char *ob_error_name(const int err)
@@ -367,34 +375,6 @@ print $fh_cpp '
       if (OB_UNLIKELY(NULL == ret || \'\0\' == ret[0]))
       {
         ret = "Unknown Error";
-      }
-    }
-    return ret;
-  }
-  const char *ob_error_cause(const int err)
-  {
-    const char *ret = "Internal Error";
-    if (OB_UNLIKELY(0 == err)) {
-      ret = "Not an Error";
-    } else if (OB_LIKELY(0 > err && err > -OB_MAX_ERROR_CODE)) {
-      ret = get_error(-err)->error_cause;
-      if (OB_UNLIKELY(NULL == ret || \'\0\' == ret[0]))
-      {
-        ret = "Internal Error";
-      }
-    }
-    return ret;
-  }
-  const char *ob_error_solution(const int err)
-  {
-    const char *ret = "Contact OceanBase Support";
-    if (OB_UNLIKELY(0 == err)) {
-      ret = "Contact OceanBase Support";
-    } else if (OB_LIKELY(0 > err && err > -OB_MAX_ERROR_CODE)) {
-      ret = get_error(-err)->error_solution;
-      if (OB_UNLIKELY(NULL == ret || \'\0\' == ret[0]))
-      {
-        ret = "Contact OceanBase Support";
       }
     }
     return ret;

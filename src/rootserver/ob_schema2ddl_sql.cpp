@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX RS
 #include "rootserver/ob_schema2ddl_sql.h"
+#include <inttypes.h>
 #include "lib/utility/ob_smart_var.h"
 
 #include "share/schema/ob_schema_service.h"
@@ -127,7 +128,7 @@ int ObSchema2DDLSql::convert(
           }
         }
         if (OB_SUCC(ret)) {
-          if (OB_FAIL(part_def.append_fmt("partition by key (%s) partitions %ld",
+          if (OB_FAIL(part_def.append_fmt("partition by key (%s) partitions %" PRId64 "",
               partition_key_str.ptr(), table_schema.get_all_part_num()))) {
           }
         }
@@ -266,7 +267,7 @@ int ObSchema2DDLSql::type2str(
         int64_t value = 0;
         if (OB_FAIL(column_schema.get_orig_default_value().get_int(value))) {
         } else {
-          n = snprintf(str_buf + nwrite, buf_size - nwrite, " default %ld", value);
+          n = snprintf(str_buf + nwrite, buf_size - nwrite, " default %" PRId64, value);
         }
       } else if (ObTinyIntType == column_schema.get_data_type()) {
         int8_t value = 0;
@@ -279,7 +280,7 @@ int ObSchema2DDLSql::type2str(
         uint64_t value = 0;
         if (OB_FAIL(column_schema.get_orig_default_value().get_uint64(value))) {
         } else {
-          n = snprintf(str_buf + nwrite, buf_size - nwrite, " default %ld", value);
+          n = snprintf(str_buf + nwrite, buf_size - nwrite, " default %" PRIu64, value);
         }
       } else if (ObVarcharType == column_schema.get_data_type()) {
         ObString value;

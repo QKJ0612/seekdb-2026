@@ -19,7 +19,7 @@
 
 #include "lib/lock/ob_spin_lock.h"
 #include "lib/container/ob_se_array.h"
-#include "sql/optimizer/ob_table_location.h"
+#include "sql/optimizer/table_access_plan.h"
 #include "sql/engine/ob_operator.h"
 #include "sql/engine/px/ob_px_bloom_filter.h"
 #include "sql/engine/px/ob_px_sqc_proxy.h"
@@ -45,6 +45,10 @@ public:
   inline bool try_acquire_constructor() { return !ATOMIC_CAS(&is_acquired_, false, true); }
   inline bool try_release_constructor() { return ATOMIC_CAS(&is_acquired_, true, false); }
   int init();
+  // The constructor is placed into the execution arena by
+  // ObJoinFilterOpInput::init_shared_msgs(); the arena does not run
+  // destructors, so the last user releases the condition explicitly.
+  void destroy() { cond_.destroy(); }
   int reset_for_rescan();
   int wait_constructed(ObOperator *join_filter_op, ObRFBloomFilterMsg *bf_msg);
   int notify_constructed();

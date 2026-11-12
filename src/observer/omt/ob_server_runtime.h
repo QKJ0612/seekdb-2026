@@ -196,15 +196,13 @@ public:
   void destroy();
   bool has_stopped() const { return stopped_ != 0; }
 
-  ObServerRuntimeMeta get_runtime_meta();
   bool is_hidden();
 
   int create_modules();
 
   share::ObServerRuntimeConfig get_runtime_config();
-  storage::ObServerRuntimeSuperBlock get_super_block();
   void set_server_resources(const share::ObServerRuntimeConfig &runtime_config);
-  void set_server_super_block(const storage::ObServerRuntimeSuperBlock &super_block);
+  void activate();
 
   void set_max_cpu(double cpu);
   void set_min_cpu(double cpu);
@@ -299,6 +297,9 @@ public:
   lib::ObMutex workers_lock_;
 
   std::atomic<int64_t> completion_cnt_;
+  // Completion counter seen at the previous background-rescue tick; per runtime
+  // so one runtime's progress cannot mask another runtime's stall.
+  int64_t last_rescue_completion_cnt_;
 
 }; // end of class ObServerRuntime
 

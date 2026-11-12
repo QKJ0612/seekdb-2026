@@ -76,8 +76,7 @@ int ObInnerSQLResult::init()
   param.set_mem_attr(ObModIds::OB_RESULT_SET,
                      ObCtxIds::DEFAULT_CTX_ID)
     .set_properties(lib::USE_TL_PAGE_OPTIONAL)
-    .set_page_size(OB_MALLOC_MIDDLE_BLOCK_SIZE)
-    .set_ablock_size(lib::INTACT_MIDDLE_AOBJECT_SIZE);
+    .set_page_size(OB_MALLOC_MIDDLE_BLOCK_SIZE);
   if (OB_FAIL(CURRENT_CONTEXT->CREATE_CONTEXT(mem_context_, param))) {
   } else if (OB_FAIL(::oceanbase::share::server_service<::oceanbase::omt::ObServerRuntimeController>()->lock_runtime(runtime_))) {
     if (OB_IN_STOP_STATE == ret) {
@@ -122,16 +121,13 @@ int ObInnerSQLResult::open()
     ret = OB_NOT_INIT;
   } else {
     result_set().get_exec_context().set_plan_start_time(execute_start_ts_);
-    SQL_INFO_GUARD(session_.get_current_query_string(), session_.get_cur_sql_id());
     ObInnerSQLSessionGuard sess_guard(&session_);
     bool is_select = ObStmt::is_select_stmt(result_set_->get_stmt_type());
     WITH_CONTEXT(mem_context_) {
       if (opened_) {
         ret = OB_INIT_TWICE;
       } else if (OB_FAIL(result_set_->open())) {
-        result_set_->refresh_location_cache_by_errno(true, ret);
-        // move after precess_retry().
-//        result_set_->close();
+        result_set_->get_exec_context().get_das_ctx().record_access_error(ret);
       } else if (is_read_&& is_select) {
         //prefetch 1 row for throwing error code and retry
         opened_ = true;
@@ -140,7 +136,7 @@ int ObInnerSQLResult::open()
             iter_end_ = true;
             ret = OB_SUCCESS;
           } else {
-            result_set_->refresh_location_cache_by_errno(true, ret);
+            result_set_->get_exec_context().get_das_ctx().record_access_error(ret);
           }
         } else {
           store_first_row_ = true;
@@ -180,7 +176,6 @@ int ObInnerSQLResult::force_close()
 int ObInnerSQLResult::inner_close()
 {
   int ret = OB_SUCCESS;
-  SQL_INFO_GUARD(session_.get_current_query_string(), session_.get_cur_sql_id());
   ObInnerSQLSessionGuard sess_guard(&session_);
   ObInterruptCheckerGuard interrupt_guard(interrupt_checker_);
 
@@ -188,7 +183,7 @@ int ObInnerSQLResult::inner_close()
 
   WITH_CONTEXT(mem_context_) {
     if (OB_FAIL(result_set_->close())) {
-      result_set_->refresh_location_cache_by_errno(true, ret);
+      result_set_->get_exec_context().get_das_ctx().record_access_error(ret);
     }
   }
   opened_ = false;
@@ -210,12 +205,11 @@ int ObInnerSQLResult::next()
     store_first_row_ = false;
   } else {
     row_ = NULL;
-    SQL_INFO_GUARD(session_.get_current_query_string(), session_.get_cur_sql_id());
     ObInnerSQLSessionGuard sess_guard(&session_);
     WITH_CONTEXT(mem_context_) {
       if (OB_FAIL(result_set_->get_next_row(row_))) {
         if (OB_ITER_END != ret) {
-          result_set_->refresh_location_cache_by_errno(true, ret);
+          result_set_->get_exec_context().get_das_ctx().record_access_error(ret);
         }
       }
 

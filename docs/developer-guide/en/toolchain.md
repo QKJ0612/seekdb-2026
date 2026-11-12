@@ -1,29 +1,35 @@
 # Install the toolchain
 
-seekdb uses CMake, Rust, and a repository-managed compiler and dependency set. Install Rust and the host tools below, then let `./build.sh release --init` prepare the pinned C/C++ dependencies under `deps/3rd`.
+seekdb uses Bazel, Rust, and a repository-managed compiler and dependency set. Install the host tools below, then run `./build.py init` to prepare Rust and the pinned C/C++ dependencies under `deps/3rd`.
 
 ## Rust
 
-Install Rust with [rustup](https://rustup.rs/). On Linux, macOS, or WSL, run the official installer and load Cargo's environment into the current shell:
+`./build.py init` installs rustup if needed, then prepares the toolchain, components, and targets declared in `rust-toolchain.toml`. The repository pins Rust `1.98.1`. Run `init` before the first build and after changing the toolchain file. Downloads and installation logs are shown in the terminal; `build` reports a missing toolchain and asks you to run `init`.
+
+Native init requires only the host Rust standard library and clippy. The Android, iOS device, and iOS simulator init options install their Rust targets on demand. CI installs the Windows GNU target explicitly before its cross-platform check. Host and cross targets use the same pinned toolchain.
+
+Rustup downloads use [RsProxy](https://rsproxy.cn/) by default. Set `RUSTUP_DIST_SERVER` or `RUSTUP_UPDATE_ROOT` before invoking `build.py` to use another source. `RUSTUP_INIT_URL` can override the rustup installer URL. These defaults apply only to the build process and its children; the script does not edit shell profiles or change the default Rust toolchain.
+
+Existing `CARGO_HOME` and `RUSTUP_HOME` settings are preserved. Without overrides, rustup uses its standard user directories. `build.py` adds the Cargo binary directory to its own `PATH`; to run Cargo directly in another shell, add that directory to your shell's `PATH`.
+
+### Native module tests
+
+Run the XML, compression, SQL network compression, HTTP, and crypto module tests with Bazel:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
+python3 build.py test -j32 \
+  //rust/xml-parser:xml_parser_test \
+  //rust/compression:compression_test \
+  //rust/sql-nio:compression_test \
+  //rust/http-client:http_client_test \
+  //rust/crypto:crypto_test \
+  --@rules_rust//rust/settings:extra_rustc_flags=-Cpanic=unwind \
+  --test_output=errors
 ```
 
-On Windows, download and run `rustup-init.exe` from the [official Rust installation page](https://www.rust-lang.org/tools/install), then open a new PowerShell window so `%USERPROFILE%\.cargo\bin` is available in `PATH`.
+The standard Rust test harness requires unwinding. This supported rules_rust setting applies to the test build and its Rust dependencies. Product builds retain `panic=abort` when invoked without the override.
 
-The repository pins Rust `1.98.1`, includes the `clippy` component, and uses these targets:
-
-```text
-x86_64-unknown-linux-gnu
-x86_64-pc-windows-gnu
-aarch64-linux-android
-aarch64-apple-ios
-aarch64-apple-ios-sim
-```
-
-The CMake build invokes Cargo from the Rust workspace when compiling the `sql-nio` library. Rustup then reads `rust/rust-toolchain.toml` and installs the pinned toolchain, components, and targets automatically. The first build may also download the locked Cargo dependencies; configure a crates.io mirror if the host cannot reach the default registry.
+The build script downloads locked Cargo dependencies through the RsProxy sparse registry, overriding the user's crates.io source selection for this step. Downloads reuse the existing Cargo cache (`CARGO_HOME`, or `~/.cargo` by default).
 
 ## Host detection and supported architectures
 
@@ -38,7 +44,7 @@ Do not infer aarch64 support for Fedora, openSUSE/SLES, UOS, or TencentOS from t
 
 The compatibility build also recognizes macOS 13 or later on both `arm64` and `x86_64`. Apple Silicon is the primary tested development platform; accepting an Intel host in the build scripts does not constitute a production-support guarantee.
 
-Windows 11 x64 uses `build.ps1` and a separate dependency flow.
+Windows 11 x64 uses `python build.py`; `init` selects the Windows dependency manifest.
 
 ## Linux host packages
 
@@ -70,50 +76,45 @@ sudo zypper install git wget curl rpm cpio make glibc-devel binutils m4 python3
 ## macOS host packages
 
 ```bash
-brew install git cmake pkg-config openssl@3 ncurses googletest
+brew install git pkg-config openssl@3 ncurses googletest
 brew install zstd lz4 utf8proc thrift re2 brotli
 ```
 
 See [Homebrew optimization](homebrew.md) if a mirror is required.
 
-### macOS 27 (Apple Silicon)
+The Rust compression module uses the pure Rust `zlib-rs` implementation. Storage compression and SQL network compression share its native Rust interfaces; C++ consumers use CXX adapters to the same module. This compression backend does not compile C sources or require CMake, Make, or Ninja. Default zlib compression uses level 6. Its compressed streams retain the zlib wire format, but compressed bytes and sizes can differ from the C implementation.
 
-macOS 27 and later select `oceanbase.macos27.arm64.deps`, which does not download
-LLVM. Third-party libraries currently reuse packages from the macOS 15 repository.
-Install Xcode or Command Line Tools with a macOS 27 SDK. CMake checks the active
-developer tools first, then `/Library/Developer/CommandLineTools` if the active
-SDK is too old. It uses the selected tools' Apple Clang by default.
+The Rust HTTP module wraps the existing target SDK libcurl through the repository's CXX integration. Rust owns client configuration, batch state, errors, and response buffers. A thin C++ adapter uses the SDK headers for libcurl options, callbacks, and resource management. The module has no `curl`, `curl-sys`, `openssl-sys`, vendored OpenSSL, AWS-LC, bindgen, or CMake dependency. The SDK retains ownership of libcurl's TLS backend, CA defaults, and supported content encodings. Existing SDK preparation and jemalloc have their own build requirements.
 
-```bash
-bash build.sh release --init
-cmake --build build_release -j8
-```
+The Rust crypto module exposes native Rust digest, HMAC, random-byte, cipher, SQL DES, and certificate-metadata interfaces. C++ consumers use CXX adapters to the same Rust implementation. Internal CXX bindings call the existing SDK OpenSSL; OpenSSL types and headers remain private to the SDK adapter. This module adds no OpenSSL crate or OpenSSL source build.
 
-Select a developer installation with
-`-DOB_MACOS_DEVELOPER_DIR=/path/to/Contents/Developer`, or set `DEVELOPER_DIR` on
-the first configure. An explicitly selected installation must provide SDK 27 or
-newer. The SDK, linker, and Rust/Cargo developer environment are recorded in the
-build rules; subsequent builds do not require the environment variable.
-
-To use Homebrew LLVM compatible with the SDK 27 C++ headers:
-
-```bash
-brew install llvm
-bash build.sh release --init -DOB_MACOS_LLVM_ROOT="$(brew --prefix llvm)"
-```
-
-This selects Homebrew Clang/Clang++; the SDK and linker still come from the Apple
-developer installation. Configuration compiles and links a C++ standard-library
-probe to check LLVM/SDK compatibility. Use a fresh build directory or run
-`bash build.sh clean` before switching compilers in an existing full build.
+On Windows, the existing SDK libcurl DLL and its zlib DLL dependency remain in the runtime package. Rust storage and SQL compression use `zlib-rs` independently of that SDK dependency.
 
 ## Windows host packages
 
-Install Python 3 and Visual Studio 2022 Build Tools with the **Desktop development with C++** workload. Then initialize the repository-managed CMake, Ninja, LLVM, win_flex_bison, OpenSSL, and third-party libraries:
+Install Python 3 and Visual Studio 2022 Build Tools with the **Desktop development with C++** workload. The project dependency SDK includes LLVM 18.1.8; no separate LLVM installation is needed.
 
-```powershell
-.\build.ps1 init
+The bundled jemalloc build also requires a POSIX shell, core utilities (including `chmod`), `awk`, `grep`, `sed`, and GNU Make. A full Git for Windows installation provides the shell and utilities; minimal Git distributions may omit required commands. GNU Make must also be available. MSYS2 can supply these tools with `pacman -S make coreutils gawk grep sed`. Add the required tool directories to the build process's `PATH`, keeping Visual Studio's compiler and linker directories first. These utilities run the build scripts; the library is compiled with clang-cl and the MSVC runtime.
+
+Open **x64 Native Tools Command Prompt for VS 2022** in the repository root, check that the build utilities are available, then initialize the parser tools and dependency SDK:
+
+```bat
+where sh
+where make
+where chmod
+where awk
+where grep
+where sed
+where lib
+python build.py init
+python build.py build seekdb
 ```
+
+`build.py` selects clang-cl from `deps\3rd\tools\llvm18`. The executable is `build\bin\src\observer\seekdb\seekdb.exe`. The build retains `_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH` to bypass the compiler version check in newer MSVC standard library headers, for both project C++ and Cargo's C++ bridges.
+
+The Windows allocator uses the bundled jemalloc `je_` APIs. Server startup sets decay to 1000/0 ms for new arenas and arena 0 through `je_mallctl`, before logger workers start. Background threads remain disabled because the upstream Windows backend does not support them.
+
+The DLLs required by the executable are emitted in the same directory, including the MSVC runtime. Packaging consumes this build output; it does not search the dependency SDK for server DLLs.
 
 .NET 8 and WiX v4 are optional and are required only for the configurator and MSI packaging path.
 
@@ -122,7 +123,8 @@ Install Python 3 and Visual Studio 2022 Build Tools with the **Desktop developme
 Return to the repository root and run:
 
 ```bash
-./build.sh release --init
+./build.py init
+./build.py version
 ```
 
 Continue with [Build and run seekdb](build-and-run.md).

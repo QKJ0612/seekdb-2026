@@ -15,6 +15,8 @@
  */
 
 #define USING_LOG_PREFIX LIB_CHARSET
+#include <climits>
+#include <inttypes.h>
 #include "ob_charset.h"
 #include "lib/worker.h"
 
@@ -392,7 +394,7 @@ char* ObCharset::lltostr(int64_t val, char *dst, int radix, int upcase)
   //use dst(start) and pret(end) to locate string, please.
   char buffer[MAX_BUFFER_SIZE];
   char *p = NULL;
-#ifndef _WIN32
+#if LONG_MAX >= INT64_MAX
   long int new_val = 0;
 #endif
   char *dig_vec= upcase ? DIG_VEC_UPPER : DIG_VEC_LOWER;
@@ -415,7 +417,7 @@ char* ObCharset::lltostr(int64_t val, char *dst, int radix, int upcase)
   if (OB_SUCC(ret)) {
     p = &buffer[sizeof(buffer)-1];
     *p = '\0';
-#ifdef _WIN32
+#if LONG_MAX < INT64_MAX
     // Windows uses LLP64, where long is 32-bit.  Keep the unsigned value in
     // fixed-width arithmetic so positive-radix conversion preserves uint64
     // semantics for negative inputs.
@@ -717,13 +719,8 @@ uint64_t ObCharset::hash(ObCollationType collation_type,
       ret = OB_ERR_UNEXPECTED;
     } else {
       seed = 0xc6a4a7935bd1e995;
-      // hash_sort expects ulong* (unsigned long*), but ret and seed are uint64_t
-      // On macOS ARM64, ulong is unsigned long, while uint64_t is unsigned long long
-      ulong ret_ulong = static_cast<ulong>(ret);
-      ulong seed_ulong = static_cast<ulong>(seed);
       cs->coll->hash_sort(cs, reinterpret_cast<const unsigned char *>(str), str_len,
-                          &ret_ulong, &seed_ulong, calc_end_space, hash_algo);
-      ret = static_cast<uint64_t>(ret_ulong);
+                          &ret, &seed, calc_end_space, hash_algo);
     }
   }
   return ret;
@@ -2165,7 +2162,7 @@ inline bool ObCharset::is_argument_valid(const ObCharsetInfo *cs, const char *st
     const ObFatalErrExtraInfoGuard *extra_info = ObFatalErrExtraInfoGuard::get_thd_local_val_ptr();
     ObCStringHelper helper;
     BACKTRACE_RET(WARN, OB_INVALID_ARGUMENT, true,
-        "invalid argument. charset info = %p, str = %p, str_len = %ld, extra_info=(%s), lbt=(%s)",
+        "invalid argument. charset info = %p, str = %p, str_len = %" PRId64 ", extra_info=(%s), lbt=(%s)",
         cs, str, str_len, (NULL == extra_info) ? NULL : helper.convert(*extra_info), lbt());
   }
   return is_arg_valid;
@@ -2190,9 +2187,9 @@ inline bool ObCharset::is_argument_valid(const ObCollationType &collation_type, 
     BACKTRACE_RET(WARN, OB_INVALID_ARGUMENT, true, "invalid argument."
         "collation_type = %d,"
         "str1 = %p,"
-        "str1_len = %ld,"
+        "str1_len = %" PRId64 ","
         "str2 = %p,"
-        "str2_len = %ld,"
+        "str2_len = %" PRId64 ","
         "extra_info=(%s),"
         "lbt=(%s)", collation_type, str1, str_len1, str2, str_len2,
         (NULL == extra_info) ? NULL : helper.convert(*extra_info), lbt());

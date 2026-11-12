@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_OPT
 #include "sql/optimizer/ob_log_exchange.h"
+#include <inttypes.h>
 #include "sql/optimizer/ob_log_table_scan.h"
 #include "sql/optimizer/ob_log_subplan_filter.h"
 #include "sql/optimizer/ob_log_join.h"
@@ -128,7 +129,7 @@ int ObLogExchange::inner_replace_op_exprs(ObRawExprReplacer &replacer)
   return ret;
 }
 
-int ObLogExchange::get_plan_item_info(PlanText &plan_text, 
+int ObLogExchange::get_plan_item_info(PlanText &plan_text,
                                       ObSqlPlanItem &plan_item)
 {
   int ret = OB_SUCCESS;
@@ -146,18 +147,18 @@ int ObLogExchange::get_plan_item_info(PlanText &plan_text,
   }
   if (OB_SUCC(ret) && OB_INVALID_ID != get_dfo_id()) {
     BEGIN_BUF_PRINT;
-    if (OB_FAIL(BUF_PRINTF(":EX%ld%04ld", 
-                            get_px_id(), 
+    if (OB_FAIL(BUF_PRINTF(":EX%" PRId64 "%04" PRId64 "",
+                            get_px_id(),
                             get_dfo_id()))) {
     }
-    END_BUF_PRINT(plan_item.object_alias_, 
+    END_BUF_PRINT(plan_item.object_alias_,
                   plan_item.object_alias_len_);
   }
   return ret;
 }
 
 
-int ObLogExchange::get_plan_special_expr_info(PlanText &plan_text, 
+int ObLogExchange::get_plan_special_expr_info(PlanText &plan_text,
                                               ObSqlPlanItem &plan_item)
 {
   int ret = OB_SUCCESS;
@@ -171,10 +172,10 @@ int ObLogExchange::get_plan_special_expr_info(PlanText &plan_text,
       OZ(append(exprs, repartition_keys_));
       OZ(append(exprs, repartition_sub_keys_));
       if (OB_SUCC(ret)) {
-        ret = print_annotation_keys(buf, 
-                                    buf_len, 
-                                    pos, 
-                                    type, 
+        ret = print_annotation_keys(buf,
+                                    buf_len,
+                                    pos,
+                                    type,
                                     exprs);
       }
     }
@@ -184,10 +185,10 @@ int ObLogExchange::get_plan_special_expr_info(PlanText &plan_text,
         OZ(exprs.push_back(e->expr_));
       }
       if (OB_SUCC(ret)) {
-        ret = print_annotation_keys(buf, 
-                                    buf_len, 
-                                    pos, 
-                                    type, 
+        ret = print_annotation_keys(buf,
+                                    buf_len,
+                                    pos,
+                                    type,
                                     exprs);
       }
     }
@@ -197,10 +198,10 @@ int ObLogExchange::get_plan_special_expr_info(PlanText &plan_text,
         OZ(exprs.push_back(sk->expr_));
       }
       if (OB_SUCC(ret)) {
-        ret = print_annotation_keys(buf, 
-                                    buf_len, 
-                                    pos, 
-                                    type, 
+        ret = print_annotation_keys(buf,
+                                    buf_len,
+                                    pos,
+                                    type,
                                     exprs);
       }
     }
@@ -232,7 +233,7 @@ int ObLogExchange::get_plan_special_expr_info(PlanText &plan_text,
   return ret;
 }
 
-int ObLogExchange::get_plan_distribution(PlanText &plan_text, 
+int ObLogExchange::get_plan_distribution(PlanText &plan_text,
                                          ObSqlPlanItem &plan_item)
 {
   int ret = OB_SUCCESS;
@@ -275,14 +276,14 @@ int ObLogExchange::get_plan_distribution(PlanText &plan_text,
   return ret;
 }
 
-int ObLogExchange::print_annotation_keys(char *buf, 
-                                        int64_t &buf_len, 
-                                        int64_t &pos, 
+int ObLogExchange::print_annotation_keys(char *buf,
+                                        int64_t &buf_len,
+                                        int64_t &pos,
                                         ExplainType type,
-                                        const ObIArray<ObRawExpr *> &keys) 
+                                        const ObIArray<ObRawExpr *> &keys)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(BUF_PRINTF("(#keys=%ld", keys.count()))) {
+  if (OB_FAIL(BUF_PRINTF("(#keys=%" PRId64 "", keys.count()))) {
   } else if (keys.count() == 0) {
     if (OB_FAIL(BUF_PRINTF("), "))) {
     }
@@ -314,7 +315,7 @@ int ObLogExchange::print_annotation_keys(char *buf,
 
 /* If using merge sort, then set local = False, range = False
  * If using task sort and range order is True, then set local = False, range = False
- * Otherwise, 
+ * Otherwise,
  * local,range    | inherit          | inherit          | True, False      | True, False |
  * EXCHANGE IN    | LOCAL/ALL        | DISTRUBUTE       | LOCAL/ALL        | DISTRUBUTE  |
  * EXCHANGE OUT   | LOCAL/ALL        | LOCAL/ALL        | DISTRUBUTE       | DISTRUBUTE  |
@@ -485,7 +486,7 @@ int ObLogExchange::compute_plan_type()
     ret = OB_ERR_UNEXPECTED;
   } else {
     exchange_allocated_ = true;
-    location_type_ = child->get_location_type();
+    access_shape_ = child->get_access_shape();
     phy_plan_type_ = ObPhyPlanType::OB_PHY_PLAN_DISTRIBUTED;
   }
   return ret;
@@ -678,26 +679,26 @@ uint64_t ObLogExchange::hash(uint64_t seed) const
    return seed;
 }
 
-int ObLogExchange::gen_px_pruning_table_locations()
+int ObLogExchange::gen_px_pruning_access_plans()
 {
   int ret = OB_SUCCESS;
   int64_t count = 0;
   ObSEArray<const ObDMLStmt *, 2>stmts;
   ObSEArray<int64_t, 2>drop_expr_idxs;
-  ObArray<ObTableLocation> table_locations;
+  ObArray<TableAccessPlan> table_access_plans;
   int64_t cur_idx = 0;
   if (OB_ISNULL(get_child(0))) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(prepare_px_pruning_param(get_child(0), count, stmts, drop_expr_idxs))) {
   } else if (count <= 0) {
     /*do nothing*/
-  } else if (OB_FAIL(add_px_table_location(get_child(0), table_locations, drop_expr_idxs, stmts, cur_idx))) {
-  } else if (!table_locations.empty()) {
-    if (OB_FAIL(table_locations_.prepare_allocate(table_locations.count(),
+  } else if (OB_FAIL(add_px_access_plan(get_child(0), table_access_plans, drop_expr_idxs, stmts, cur_idx))) {
+  } else if (!table_access_plans.empty()) {
+    if (OB_FAIL(table_access_plans_.prepare_allocate(table_access_plans.count(),
         get_plan()->get_optimizer_context().get_allocator()))) {
     } else {
-      for (int i = 0; i < table_locations.count() && OB_SUCC(ret); ++i) {
-        OZ(table_locations_.at(i).assign(table_locations.at(i)));
+      for (int i = 0; i < table_access_plans.count() && OB_SUCC(ret); ++i) {
+        OZ(table_access_plans_.at(i).assign(table_access_plans.at(i)));
       }
     }
   }
@@ -742,8 +743,8 @@ int ObLogExchange::prepare_px_pruning_param(ObLogicalOperator *op,
   return ret;
 }
 
-int ObLogExchange::add_px_table_location(ObLogicalOperator *op,
-    ObIArray<ObTableLocation> &table_locations,
+int ObLogExchange::add_px_access_plan(ObLogicalOperator *op,
+    ObIArray<TableAccessPlan> &table_access_plans,
     common::ObIArray<int64_t> &drop_expr_idxs,
     const common::ObIArray<const ObDMLStmt *> &stmts,
     int64_t &cur_idx)
@@ -757,10 +758,10 @@ int ObLogExchange::add_px_table_location(ObLogicalOperator *op,
     ObLogTableScan *table_scan = static_cast<ObLogTableScan* >(op);
     ObSEArray<ObRawExpr *, 8>exprs;
     bool has_exec_param = false;
-    OZ(find_table_location_exprs(drop_expr_idxs, table_scan->get_range_conditions(), exprs, has_exec_param));
-    OZ(find_table_location_exprs(drop_expr_idxs, table_scan->get_filter_exprs(), exprs, has_exec_param));
+    OZ(find_partition_access_exprs(drop_expr_idxs, table_scan->get_range_conditions(), exprs, has_exec_param));
+    OZ(find_partition_access_exprs(drop_expr_idxs, table_scan->get_filter_exprs(), exprs, has_exec_param));
     if (OB_SUCC(ret) && !exprs.empty() && has_exec_param) {
-      SMART_VAR(ObTableLocation, table_location) {
+      SMART_VAR(TableAccessPlan, table_access_plan) {
         const ObDMLStmt *cur_stmt = NULL;
         const ObDataTypeCastParams dtc_params = ObBasicSessionInfo::create_dtc_params(
             get_plan()->get_optimizer_context().get_session_info());
@@ -769,7 +770,7 @@ int ObLogExchange::add_px_table_location(ObLogicalOperator *op,
           ret = OB_ERR_UNEXPECTED;
           LOG_WARN("stmts idx is unexpected", K(cur_idx), K(stmts.count()));
         } else if (FALSE_IT(cur_stmt = stmts.at(cur_idx))) {
-        } else if (OB_FAIL(table_location.init(
+        } else if (OB_FAIL(table_access_plan.init(
               *get_plan()->get_optimizer_context().get_sql_schema_guard(),
               *cur_stmt,
                get_plan()->get_optimizer_context().get_exec_ctx(),
@@ -779,10 +780,10 @@ int ObLogExchange::add_px_table_location(ObLogicalOperator *op,
                NULL,
                dtc_params,
                false))) {
-        } else if (table_location.is_all_partition()) {
+        } else if (table_access_plan.is_all_partition()) {
           /*do nothing*/
-        } else if (FALSE_IT(table_location.set_has_dynamic_exec_param(true))) {
-        } else if (OB_FAIL(table_locations.push_back(table_location))) {
+        } else if (FALSE_IT(table_access_plan.set_has_dynamic_exec_param(true))) {
+        } else if (OB_FAIL(table_access_plans.push_back(table_access_plan))) {
         }
       }
     }
@@ -791,8 +792,8 @@ int ObLogExchange::add_px_table_location(ObLogicalOperator *op,
     }
   } else {
     for (int i = 0; i < op->get_num_of_child() && OB_SUCC(ret); ++i) {
-      if (OB_FAIL(SMART_CALL(add_px_table_location(op->get_child(i),
-          table_locations, drop_expr_idxs, stmts, cur_idx)))) {
+      if (OB_FAIL(SMART_CALL(add_px_access_plan(op->get_child(i),
+          table_access_plans, drop_expr_idxs, stmts, cur_idx)))) {
       }
     }
   }
@@ -863,7 +864,7 @@ int ObLogExchange::check_expr_is_need(const ObRawExpr *expr,
   return ret;
 }
 
-int ObLogExchange::find_table_location_exprs(const common::ObIArray<int64_t> &drop_exprs_idxs,
+int ObLogExchange::find_partition_access_exprs(const common::ObIArray<int64_t> &drop_exprs_idxs,
     const common::ObIArray<ObRawExpr *> &filters,
     common::ObIArray<ObRawExpr *> &exprs,
     bool &has_exec_param)

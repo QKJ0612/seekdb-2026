@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX STORAGE_COMPACTION
 #include "ob_tablet_merge_task.h"
+#include <inttypes.h>
 #include "share/rc/ob_server_runtime.h"
 #include "storage/compaction/ob_partition_merger.h"
 #include "storage/tx_storage/ob_ls_service.h"
@@ -338,7 +339,7 @@ int ObTabletMergeDag::fill_info_param(compaction::ObIBasicInfoParam *&out_param,
 int ObTabletMergeDag::fill_dag_key(char *buf, const int64_t buf_len) const
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(databuff_printf(buf, buf_len, "tablet_id=%ld", tablet_id_.id()))) {
+  if (OB_FAIL(databuff_printf(buf, buf_len, "tablet_id=%" PRId64 "", tablet_id_.id()))) {
   }
   return ret;
 }
@@ -624,7 +625,6 @@ int ObTabletMergePrepareTask::process()
 {
   int ret = OB_SUCCESS;
   ObBasicTabletMergeCtx *ctx = NULL;
-  ObTaskController::get().switch_task(share::ObTaskType::DATA_MAINTAIN);
   bool finish_flag = false;
 #ifdef ERRSIM
   DEBUG_SYNC(MERGE_PARTITION_TASK);
@@ -755,7 +755,6 @@ int ObTabletMergeFinishTask::process()
 {
   int ret = OB_SUCCESS;
   int tmp_ret = OB_SUCCESS;
-  ObTaskController::get().switch_task(share::ObTaskType::DATA_MAINTAIN);
   ObTabletMergeCtx *ctx_ptr = nullptr;
   DEBUG_SYNC(MERGE_PARTITION_FINISH_TASK);
 
@@ -892,7 +891,6 @@ int ObTabletMergeTask::generate_next_task(ObITask *&next_task)
 int ObTabletMergeTask::process()
 {
   int ret = OB_SUCCESS;
-  ObTaskController::get().switch_task(share::ObTaskType::DATA_MAINTAIN);
 
 #ifdef ERRSIM
   ret = OB_E(EventTable::EN_COMPACTION_MERGE_TASK) OB_SUCCESS;

@@ -16,12 +16,13 @@
 
 #define USING_LOG_PREFIX STORAGE
 
-#include "config_bridge.h"
+#include "rust/config.h"
+#include <inttypes.h>
 #include "storage/meta_store/ob_local_storage_meta_service.h"
 #include "share/rc/ob_server_runtime.h"
 #include "storage/tablet/ob_tablet_persister.h"
 #include "src/storage/ls/ob_ls.h"
-#include "storage/slog_ckpt/ob_linked_macro_block_writer.h"
+#include "storage/blockstore/ob_linked_macro_block_writer.h"
 #include "storage/tablet/ob_tablet_block_aggregated_info.h"
 #include "storage/tablet/ob_tablet_block_header.h"
 #include "storage/tablet/ob_tablet_common.h"
@@ -129,7 +130,7 @@ int64_t ObSSTablePersistWrapper::get_serialize_size() const
 
 bool ObTabletPersisterParam::is_valid() const
 {
-  return tablet_id_.is_valid() && ls_epoch_ >= 0;
+  return tablet_id_.is_valid();
 }
 
 //==================================== ObMultiTimeStats====================================//
@@ -160,7 +161,7 @@ int64_t ObMultiTimeStats::TimeStats::to_string(char *buf, const int64_t buf_len)
   int ret = OB_SUCCESS;
   int64_t pos = 0;
   int64_t i = 0;
-  ret = databuff_printf(buf, buf_len, pos, "owner:'%s' total=%ld%s",
+  ret = databuff_printf(buf, buf_len, pos, "owner:'%s' total=%" PRId64 "%s",
       owner_, last_ts_ - start_ts_, click_count_ > 0 ? ", time_dist: " : "");
 
   if (OB_SUCC(ret) && click_count_ > 0) {
@@ -231,7 +232,7 @@ int64_t ObMultiTimeStats::to_string(char *buf, const int64_t buf_len) const
   int64_t pos = 0;
   J_OBJ_START();
   for (int64_t i = 0; i < stats_count_; i++) {
-    databuff_printf(buf, buf_len, pos, "stats[%ld]: ", i);
+    databuff_printf(buf, buf_len, pos, "stats[%" PRId64 "]: ", i);
     BUF_PRINTO(stats_[i]);
     if (i != stats_count_-1) {
       J_NEWLINE();
@@ -334,7 +335,7 @@ int ObTabletPersister::inner_persist_and_transform_tablet(
   } else if (OB_UNLIKELY(!old_tablet.hold_ref_cnt_)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(persister.multi_stats_.acquire_stats("persist_and_transform_only_tablet_meta", time_stats))) {
-  } else if (OB_FAIL(old_tablet.load_macro_info(param.ls_epoch_, persister.allocator_, macro_info, in_memory))) {
+  } else if (OB_FAIL(old_tablet.load_macro_info(persister.allocator_, macro_info, in_memory))) {
   } else if (FALSE_IT(time_stats->click("load_macro_info"))) {
   } else if (OB_FAIL(persister.modify_and_fill_tablet(old_tablet, modifier, new_tablet))) {
   } else {
@@ -1076,7 +1077,7 @@ int ObTabletPersister::fetch_and_persist_sstable(
     }
   }
 
-  if (FAILEDx(time_stats->set_extra_info("%s:%ld",
+  if (FAILEDx(time_stats->set_extra_info("%s:%" PRId64 "",
       "normal_sst_cnt", sstable_persist_ctx.normal_sstable_cnt_))) {
   } else if (FALSE_IT(time_stats->click("fill_all_sstable_write_info"))) {
   } else if (OB_FAIL(convert_macro_info_map(

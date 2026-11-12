@@ -18,6 +18,7 @@
 #define OCEANBASE_SHARE_OB_DML_SQL_SPLICER_H_
 
 #include "lib/string/ob_sql_string.h"
+#include <inttypes.h>
 #include "lib/container/ob_se_array.h"
 #include "share/ob_core_table_proxy.h"
 namespace oceanbase
@@ -192,9 +193,9 @@ private:
   int append_uint64_value(const uint64_t value, bool &is_null);
   int append_value(const uint64_t value, bool &is_null);
   int append_value(const int64_t value, bool &is_null);
-#if defined(__APPLE__) || defined(_WIN32)
+#if defined(__APPLE__) || defined(_WIN32) || defined(__EMSCRIPTEN__)
   // macOS: long and long long are different types, need explicit overload for long
-  // Windows: long is 32-bit and distinct from int64_t, need explicit overload for long
+  // Windows and wasm32: long is 32-bit and distinct from int64_t, need explicit overload for long
   int append_value(const long value, bool &is_null);
 #endif
   int append_value(const uint32_t value, bool &is_null);
@@ -311,7 +312,7 @@ template <typename T>
 int ObDMLSqlSplicer::append_value(const T &obj, bool &is_null, common::TrueType)
 {
   is_null = false;
-  return values_.append_fmt("%ld", static_cast<int64_t>(obj));
+  return values_.append_fmt("%" PRId64 "", static_cast<int64_t>(obj));
 }
 
 template <typename T>

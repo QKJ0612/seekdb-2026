@@ -15,7 +15,8 @@
  */
 
 #define USING_LOG_PREFIX SQL_RESV
-#include "config_bridge.h"
+#include "rust/config.h"
+#include <inttypes.h>
 #include "ob_ddl_resolver.h"
 #include "data_plane/blocksstable/ob_index_block_util.h"
 #include "sql/resolver/dml/ob_dml_resolver.h"
@@ -5888,7 +5889,7 @@ int ObDDLResolver::create_fk_cons_name_automatically(ObString &foreign_key_name)
   }
   if (OB_SUCC(ret)) {
     // The purpose of using a timestamp is to ensure the uniqueness of the foreign key name while avoiding conflicts between user-declared foreign key constraint names and system-generated constraint names
-    if (snprintf(temp_str_buf, sizeof(temp_str_buf), "%.*s_OBFK_%ld", tmp_table_name.length(), tmp_table_name.ptr(),
+    if (snprintf(temp_str_buf, sizeof(temp_str_buf), "%.*s_OBFK_%" PRId64, tmp_table_name.length(), tmp_table_name.ptr(),
                  ObTimeUtility::current_time()) < 0) {
       ret = OB_SIZE_OVERFLOW;
       SQL_RESV_LOG(WARN, "failed to generate buffer for temp_str_buf", K(ret));
@@ -7607,7 +7608,7 @@ int ObDDLResolver::check_and_set_partition_names(ObPartitionedStmt *stmt,
       while (OB_SUCC(ret) && !is_valid) {
         char part_name[OB_MAX_PARTITION_NAME_LENGTH];
         int64_t pos = 0;
-        if (OB_FAIL(databuff_printf(part_name, OB_MAX_PARTITION_NAME_LENGTH, pos, "P%ld", max_part_id))) {
+        if (OB_FAIL(databuff_printf(part_name, OB_MAX_PARTITION_NAME_LENGTH, pos, "P%" PRId64 "", max_part_id))) {
         } else {
           part_name_str.assign(part_name, static_cast<int32_t>(pos));
           ObPartitionNameHashWrapper partition_name_key(part_name_str);
@@ -7714,7 +7715,7 @@ int ObDDLResolver::check_and_set_individual_subpartition_names(ObPartitionedStmt
       while (OB_SUCC(ret) && !is_valid) {
         char part_name[OB_MAX_PARTITION_NAME_LENGTH];
         int64_t pos = 0;
-        if (OB_FAIL(databuff_printf(part_name, OB_MAX_PARTITION_NAME_LENGTH, pos, "P%ld", max_part_id))) {
+        if (OB_FAIL(databuff_printf(part_name, OB_MAX_PARTITION_NAME_LENGTH, pos, "P%" PRId64 "", max_part_id))) {
         } else {
           part_name_str.assign(part_name, static_cast<int32_t>(pos));
           ObPartitionNameHashWrapper partition_name_key(part_name_str);

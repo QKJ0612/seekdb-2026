@@ -16,6 +16,7 @@
  
 #define USING_LOG_PREFIX SQL
 #include "ob_optimizer_trace_impl.h"
+#include <inttypes.h>
 #include "lib/file/file_directory_utils.h"
 #include "share/ob_version.h"
 #include "sql/optimizer/ob_log_values.h"
@@ -288,12 +289,12 @@ int ObOptimizerTraceImpl::append(const common::ObString &msg)
 
 int ObOptimizerTraceImpl::append(const int64_t &value)
 {
-  return append_format<32>("%ld", value);
+  return append_format<32>("%" PRId64 "", value);
 }
 
 int ObOptimizerTraceImpl::append(const uint64_t &value)
 {
-  return append_format<32>("%lu", value);
+  return append_format<32>("%" PRIu64 "", value);
 }
 
 int ObOptimizerTraceImpl::append(const uint32_t &value)
@@ -349,20 +350,20 @@ int ObOptimizerTraceImpl::append(const OpParallelRule& rule)
   return ret;
 }
 
-int ObOptimizerTraceImpl::append(const ObTableLocationType& type)
+int ObOptimizerTraceImpl::append(const TableAccessShape& type)
 {
   int ret = OB_SUCCESS;
   switch(type) {
-    case OB_TBL_LOCATION_UNINITIALIZED: 
+    case TABLE_ACCESS_UNINITIALIZED:
       ret = append("uninitialized");
       break;
-    case OB_TBL_LOCATION_LOCAL: 
+    case TABLE_ACCESS_SINGLE_TABLET:
       ret = append("local");
       break;
-    case OB_TBL_LOCATION_DISTRIBUTED: 
+    case TABLE_ACCESS_MULTI_TABLET:
       ret = append("distribute");
       break;
-    case OB_TBL_LOCATION_ALL: 
+    case TABLE_ACCESS_ANY:
       ret = append("match all");
       break;
   }
@@ -650,7 +651,7 @@ int ObOptimizerTraceImpl::append(const ObShardingInfo *info)
   if (OB_ISNULL(info)) {
     append("null sharding info");
   } else {
-    append("location type:", info->get_location_type());
+    append("access shape:", info->get_access_shape());
     append(", partition count:", info->get_part_cnt());
   }
   return ret;
@@ -669,7 +670,7 @@ int ObOptimizerTraceImpl::append(const CandidatePlan &plan)
           ",width:", plan.plan_tree_->get_width());
     new_line();
     append("partition wise", plan.plan_tree_->is_partition_wise(), ", plan type:", plan.plan_tree_->get_phy_plan_type(), 
-    ", location type:", plan.plan_tree_->get_location_type());
+    ", access shape:", plan.plan_tree_->get_access_shape());
     new_line();
     append("parallel:", plan.plan_tree_->get_parallel(), ", parallel rule:", plan.plan_tree_->get_op_parallel_rule());
     new_line();
@@ -790,22 +791,17 @@ int ObOptimizerTraceImpl::append(const ObNewRange &range)
   return ret;
 }
 
-int ObOptimizerTraceImpl::append(const ObOptTabletLoc& tablet_loc)
+int ObOptimizerTraceImpl::append(const TabletAccessTarget& tablet_access)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(append("(partition id:", tablet_loc.get_partition_id()))) {
-  } else if (tablet_loc.get_first_level_part_id() >= 0 &&
-             OB_FAIL(append(", first level partition id:", tablet_loc.get_first_level_part_id()))) {
+  if (OB_FAIL(append("(partition id:", tablet_access.get_partition_id()))) {
+  } else if (tablet_access.get_first_level_part_id() >= 0 &&
+             OB_FAIL(append(", first level partition id:", tablet_access.get_first_level_part_id()))) {
   } else if (OB_FAIL(append(", tablet id:"))) {
-  } else if (OB_FAIL(append(tablet_loc.get_tablet_id().id()))) {
+  } else if (OB_FAIL(append(tablet_access.get_tablet_id().id()))) {
   } else if (OB_FAIL(append(")"))) {
   }
   return ret;
-}
-
-int ObOptimizerTraceImpl::append(const ObCandiTabletLoc& candi_tablet_loc)
-{
-  return append(candi_tablet_loc.get_partition_location());
 }
 
 int ObOptimizerTraceImpl::append(const ObBatchEstTasks& task)
@@ -858,7 +854,7 @@ int ObOptimizerTraceImpl::append(const ObIndexMergeNode *node)
 
 int ObOptimizerTraceImpl::append(const ObVersionRange& version_range)
 {
-  return append_format<128>("%ld-%ld-%ld",
+  return append_format<128>("%" PRId64 "-%" PRId64 "-%" PRId64 "",
                             version_range.base_version_,
                             version_range.multi_version_start_,
                             version_range.snapshot_version_);

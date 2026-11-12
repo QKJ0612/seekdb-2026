@@ -14,8 +14,9 @@
  * limitations under the License.
  */
 
-#include "config_bridge.h"
+#include "rust/config.h"
 #include "lib/utility/utility.h"
+#include "lib/alloc/alloc_func.h"
 #include "lib/time/ob_time_utility.h"
 #include "lib/string/ob_sql_string.h"
 #include "lib/cpu/ob_cpu_topology.h"
@@ -23,19 +24,19 @@
 #include "share/ob_encryption_util.h"
 #include "share/ob_server_struct.h"
 #include "share/ob_telemetry.h"
+#include "share/inner_table/local_table_schema.h"
 #include "common/ob_version_def.h"
-#include "common/json_type/ob_json_parse.h"
-#include <curl/curl.h>
+#include "common/json_type/json_builder.h"
+#ifndef __EMSCRIPTEN__
+#include "rust/http_client.h"
+#endif
 #include <errno.h>
-#include <openssl/hmac.h>
-#include <openssl/sha.h>
+#include "rust/crypto.h"
 #include <stdlib.h>
 #include <string.h>
 #include <mutex>
 
 #ifdef _WIN32
-#include <direct.h>
-#include <io.h>
 #include <windows.h>
 #ifdef ERROR
 #undef ERROR
@@ -57,11 +58,11 @@ namespace share
 {
 
 static const char *TELEMETRY_URL = "https://openwebapi.oceanbase.com/api/web/oceanbase/report";
-static const char *TELEMETRY_FILE_NAME = "run/telemetry.json";
 static const char *TELEMETRY_INSTANCE_ID_ENV_NAME = "SEEKDB_TELEMETRY_INSTANCE_ID";
-// v6 persists the telemetry file creation time in createdAtUs.
+// Payload schema version reported to the telemetry endpoint.
 static const int64_t TELEMETRY_VERSION = 6;
 static const int64_t TELEMETRY_MACHINE_ID_BYTE_LENGTH = 16;
+static const size_t TELEMETRY_HASH_BYTE_LENGTH = 32;
 static const int64_t TELEMETRY_MACHINE_ID_HEX_LENGTH = 2 * TELEMETRY_MACHINE_ID_BYTE_LENGTH;
 static const int64_t TELEMETRY_BASE_DIR_LENGTH_FIELD_SIZE = 8;
 static const int64_t TELEMETRY_SCOPE_ID_LENGTH_FIELD_SIZE = 8;
@@ -310,7 +311,6 @@ int generate_telemetry_uuid(const char *machine_id,
                             const int64_t uuid_len)
 {
   int ret = OB_SUCCESS;
-  unsigned int digest_len = 0;
   const bool has_scope_id = OB_NOT_NULL(scope_id) && scope_id_len > 0;
   const bool valid_scope_args = (OB_ISNULL(scope_id) && 0 == scope_id_len) || has_scope_id;
   unsigned char machine_id_bytes[TELEMETRY_MACHINE_ID_BYTE_LENGTH] = {0};
@@ -322,7 +322,7 @@ int generate_telemetry_uuid(const char *machine_id,
                            + common::OB_MAX_FILE_NAME_LENGTH
                            + TELEMETRY_SCOPE_ID_LENGTH_FIELD_SIZE
                            + TELEMETRY_MACHINE_ID_BYTE_LENGTH] = {0};
-  unsigned char digest[SHA256_DIGEST_LENGTH] = {0};
+  unsigned char digest[TELEMETRY_HASH_BYTE_LENGTH] = {0};
   unsigned char uuid_bytes[TELEMETRY_MACHINE_ID_BYTE_LENGTH] = {0};
   if (OB_ISNULL(uuid) || uuid_len <= TELEMETRY_UUID_STRING_LENGTH
       || !valid_scope_args) {
@@ -363,12 +363,12 @@ int generate_telemetry_uuid(const char *machine_id,
         input_pos += sizeof(scope_id_bytes);
       }
 
-      if (OB_ISNULL(HMAC(EVP_sha256(),
-                         machine_id_bytes, static_cast<int>(sizeof(machine_id_bytes)),
-                         hmac_input, static_cast<size_t>(input_pos),
-                         digest, &digest_len))) {
-        ret = OB_ERR_UNEXPECTED;
-      } else if (OB_UNLIKELY(SHA256_DIGEST_LENGTH != digest_len)) {
+      const auto result = crypto::hmac_into(
+          static_cast<uint32_t>(OB_HASH_SH256),
+          rust::Slice<const uint8_t>(machine_id_bytes, sizeof(machine_id_bytes)),
+          rust::Slice<const uint8_t>(hmac_input, input_pos),
+          rust::Slice<uint8_t>(digest, sizeof(digest)));
+      if (crypto::Code::Ok != result.code || result.size != sizeof(digest)) {
         ret = OB_ERR_UNEXPECTED;
       } else {
         MEMCPY(uuid_bytes, digest, sizeof(uuid_bytes));
@@ -454,11 +454,10 @@ static int generate_telemetry_container_scope_id(
     int64_t &scope_id_len)
 {
   int ret = OB_SUCCESS;
-  unsigned int digest_len = 0;
   unsigned char hmac_input[sizeof(TELEMETRY_CONTAINER_SCOPE_DOMAIN) - 1
                            + 1 + sizeof(uint64_t)
                            + TELEMETRY_CONTAINER_ID_MAX_LENGTH] = {0};
-  unsigned char digest[SHA256_DIGEST_LENGTH] = {0};
+  unsigned char digest[TELEMETRY_HASH_BYTE_LENGTH] = {0};
   unsigned char uuid_bytes[TELEMETRY_MACHINE_ID_BYTE_LENGTH] = {0};
   scope_id_len = 0;
   if (OB_ISNULL(identity) || identity_len <= 0
@@ -484,11 +483,12 @@ static int generate_telemetry_container_scope_id(
     input_pos += sizeof(value_len);
     MEMCPY(hmac_input + input_pos, identity, identity_len);
     input_pos += identity_len;
-    if (OB_ISNULL(HMAC(EVP_sha256(),
-                       TELEMETRY_APP_ID, static_cast<int>(sizeof(TELEMETRY_APP_ID)),
-                       hmac_input, static_cast<size_t>(input_pos), digest, &digest_len))) {
-      ret = OB_ERR_UNEXPECTED;
-    } else if (OB_UNLIKELY(SHA256_DIGEST_LENGTH != digest_len)) {
+    const auto result = crypto::hmac_into(
+        static_cast<uint32_t>(OB_HASH_SH256),
+        rust::Slice<const uint8_t>(TELEMETRY_APP_ID, sizeof(TELEMETRY_APP_ID)),
+        rust::Slice<const uint8_t>(hmac_input, input_pos),
+        rust::Slice<uint8_t>(digest, sizeof(digest)));
+    if (crypto::Code::Ok != result.code || result.size != sizeof(digest)) {
       ret = OB_ERR_UNEXPECTED;
     } else {
       MEMCPY(uuid_bytes, digest, sizeof(uuid_bytes));
@@ -1076,7 +1076,7 @@ int get_host_hash(char *buf, const int64_t buf_len)
   int ret = OB_SUCCESS;
   int64_t out_len = 0;
   char ip_buf[MAX_IP_ADDR_LENGTH] = {'\0'};
-  char hash_buf[SHA256_DIGEST_LENGTH + 1] = {'\0'};
+  char hash_buf[TELEMETRY_HASH_BYTE_LENGTH + 1] = {'\0'};
   ObAddr addr = GCTX.self_addr();
   if (!addr.ip_to_string(ip_buf, sizeof(ip_buf))) {
     ret = OB_ERR_UNEXPECTED;
@@ -1129,15 +1129,15 @@ static int generate_telemetry_json(const char* reporter, const char* event_name,
     ObIAllocator *allocator, ObString &json_str, const int64_t created_at_us)
 {
   int ret = OB_SUCCESS;
-  const int64_t SHA256_DIGEST_HEX_LEN = 2 * SHA256_DIGEST_LENGTH + 1;
+  const int64_t SHA256_DIGEST_HEX_LEN = 2 * TELEMETRY_HASH_BYTE_LENGTH + 1;
   const int64_t OS_INFO_LEN = 32;
   const int64_t CPU_MODEL_LEN = 64;
   const int64_t SIZE_STR_LEN = 16;
-  ObJsonObject root(allocator);
-  ObJsonObject host(allocator);
-  ObJsonObject instance(allocator);
-  ObJsonObject resource(allocator);
-  ObJsonObject content(allocator);
+  JsonContainerBuilder root(true);
+  JsonContainerBuilder host(true);
+  JsonContainerBuilder instance(true);
+  JsonContainerBuilder resource(true);
+  JsonContainerBuilder content(true);
   char os_name[OS_INFO_LEN] = {'\0'};
   char os_version[OS_INFO_LEN] = {'\0'};
   char cpu_model[CPU_MODEL_LEN] = {'\0'};
@@ -1170,264 +1170,94 @@ static int generate_telemetry_json(const char* reporter, const char* event_name,
   }
 
   // construct host
-  ObJsonString os_json(os_name);
-  ObJsonString os_version_json(os_version);
-  ObJsonString cpu_json(cpu_model);
-  ObJsonInt host_cpu_count_json(host_cpu_count);
-  ObJsonString host_memory_size_json(host_memory_size);
   if (OB_FAIL(ret)) {
-  } else if (OB_FAIL(host.add("os", &os_json))) {
-  } else if (OB_FAIL(host.add("osVersion", &os_version_json))) {
-  } else if (OB_FAIL(host.add("cpu", &cpu_json))) {
-  } else if (OB_FAIL(host.add("cpuCount", &host_cpu_count_json))) {
-  } else if (OB_FAIL(host.add("memorySize", &host_memory_size_json))) {
+  } else if (OB_FAIL(host.append_string("os", os_name))) {
+  } else if (OB_FAIL(host.append_string("osVersion", os_version))) {
+  } else if (OB_FAIL(host.append_string("cpu", cpu_model))) {
+  } else if (OB_FAIL(host.append_integer("cpuCount", host_cpu_count))) {
+  } else if (OB_FAIL(host.append_string("memorySize", host_memory_size))) {
   }
 
   // construct instance
-  ObJsonString host_hash_json(host_hash);
-  ObJsonInt port_json(port);
-  ObJsonInt timestamp_json(ts);
   if (OB_FAIL(ret)) {
-  } else if (OB_FAIL(instance.add("hostHash", &host_hash_json))) {
-  } else if (OB_FAIL(instance.add("port", &port_json))) {
-  } else if (OB_FAIL(instance.add("createTimestamp", &timestamp_json))) {
+  } else if (OB_FAIL(instance.append_string("hostHash", host_hash))) {
+  } else if (OB_FAIL(instance.append_integer("port", port))) {
+  } else if (OB_FAIL(instance.append_integer("createTimestamp", ts))) {
   }
 
   // construct resource
-  ObJsonInt cpu_count_json(cpu_count);
-  ObJsonString memory_budget_json(memory_budget);
-  ObJsonString log_disk_size_json(log_disk_size);
-  ObJsonString datafile_size_json(datafile_size);
   if (OB_FAIL(ret)) {
-  } else if (OB_FAIL(resource.add("cpuCount", &cpu_count_json))) {
+  } else if (OB_FAIL(resource.append_integer("cpuCount", cpu_count))) {
   // Keep the legacy JSON key for telemetry schema compatibility.
-  } else if (OB_FAIL(resource.add("memoryLimit", &memory_budget_json))) {
-  } else if (OB_FAIL(resource.add("logDiskSize", &log_disk_size_json))) {
-  } else if (OB_FAIL(resource.add("dataFileSize", &datafile_size_json))) {
+  } else if (OB_FAIL(resource.append_string("memoryLimit", memory_budget))) {
+  } else if (OB_FAIL(resource.append_string("logDiskSize", log_disk_size))) {
+  } else if (OB_FAIL(resource.append_string("dataFileSize", datafile_size))) {
   }
 
   // construct content
-  ObJsonString id_json(id);
-  ObJsonString version_json(version);
-  ObJsonString reporter_json(reporter);
-  ObJsonString event_json(event_name);
-  ObJsonInt telemetry_version_json(TELEMETRY_VERSION);
   if (OB_FAIL(ret)) {
-  } else if (OB_FAIL(content.add("id", &id_json))) {
-  } else if (OB_FAIL(content.add("version", &version_json))) {
-  } else if (OB_FAIL(content.add("reporter", &reporter_json))) {
-  } else if (OB_FAIL(content.add("host", &host))) {
-  } else if (OB_FAIL(content.add("instance", &instance))) {
-  } else if (OB_FAIL(content.add("resource", &resource))) {
-  } else if (OB_FAIL(content.add("event", &event_json))) {
-  } else if (OB_FAIL(content.add("telemetryVersion", &telemetry_version_json))) {
+  } else if (OB_FAIL(content.append_string("id", id))) {
+  } else if (OB_FAIL(content.append_string("version", version))) {
+  } else if (OB_FAIL(content.append_string("reporter", reporter))) {
+  } else if (OB_FAIL(content.append_container("host", host))) {
+  } else if (OB_FAIL(content.append_container("instance", instance))) {
+  } else if (OB_FAIL(content.append_container("resource", resource))) {
+  } else if (OB_FAIL(content.append_string("event", event_name))) {
+  } else if (OB_FAIL(content.append_integer("telemetryVersion", TELEMETRY_VERSION))) {
   }
 
   // construct root
-  ObJsonString component_json(OB_SEEKDB_NAME);
-  ObJsonInt created_at_json(created_at_us);
-  ObJsonBoolean sent_json(false);
   if (OB_FAIL(ret)) {
-  } else if (OB_FAIL(root.add("content", &content))) {
-  } else if (OB_FAIL(root.add("component", &component_json))) {
-  } else if (OB_FAIL(root.add("createdAtUs", &created_at_json))) {
-  } else if (OB_FAIL(root.add("sent", &sent_json))) {
+  } else if (OB_FAIL(root.append_container("content", content))) {
+  } else if (OB_FAIL(root.append_string("component", OB_SEEKDB_NAME))) {
   }
 
-  ObJsonBuffer j_buf(allocator);
+  ObString binary;
+  ObString text;
   if (OB_FAIL(ret)) {
-  } else if (OB_FAIL(root.print(j_buf, false))) {
-  } else {
-    json_str.assign_ptr(j_buf.ptr(), j_buf.length());
+  } else if (OB_FAIL(root.finish(binary))) {
+  } else if (OB_FAIL(root.format(text))) {
+  } else if (OB_FAIL(ob_write_string(*allocator, text, json_str))) {
   }
 
   return ret;
 }
 
-// Publish complete JSON with an atomic replacement. Updating sent must never
-// truncate the only copy of the creation time and instance identity.
-static int write_telemetry_file(const ObString &json_str)
+int send_telemetry_by_http(const char *url, const ObString &json_str)
 {
-  int ret = OB_SUCCESS;
-  char temp_path[common::OB_MAX_FILE_NAME_LENGTH] = {'\0'};
-  FILE *fp = nullptr;
-#ifdef _WIN32
-  if (0 == GetTempFileNameA("run", "tel", 0, temp_path)) {
-    ret = OB_IO_ERROR;
-  } else if (OB_ISNULL(fp = fopen(temp_path, "wb"))) {
-    ret = OB_IO_ERROR;
-  }
+#ifdef __EMSCRIPTEN__
+  return OB_NOT_SUPPORTED;
 #else
-  snprintf(temp_path, sizeof(temp_path), "%s.XXXXXX", TELEMETRY_FILE_NAME);
-  const int fd = mkstemp(temp_path);
-  if (fd < 0) {
-    ret = OB_IO_ERROR;
-  } else if (OB_ISNULL(fp = fdopen(fd, "wb"))) {
-    close(fd);
-    ret = OB_IO_ERROR;
-  }
-#endif
-  if (OB_NOT_NULL(fp)) {
-    if (json_str.length() != fwrite(json_str.ptr(), 1, json_str.length(), fp)
-        || 0 != fflush(fp)) {
-      ret = OB_IO_ERROR;
-    }
-#ifdef _WIN32
-    if (OB_SUCC(ret) && 0 != _commit(_fileno(fp))) {
-#else
-    if (OB_SUCC(ret) && 0 != fsync(fileno(fp))) {
-#endif
-      ret = OB_IO_ERROR;
-    }
-    if (0 != fclose(fp)) {
-      ret = OB_IO_ERROR;
-    }
-  }
-  if (OB_SUCC(ret)) {
-#ifdef _WIN32
-    if (!MoveFileExA(temp_path, TELEMETRY_FILE_NAME,
-                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-#else
-    if (0 != rename(temp_path, TELEMETRY_FILE_NAME)) {
-#endif
-      ret = OB_IO_ERROR;
-    }
-  }
-  if (OB_FAIL(ret)) {
-    remove(temp_path);
-    LOG_WARN("Failed to persist telemetry state", K(ret), K(errno));
-  }
-  return ret;
-}
-
-static int read_telemetry_file(ObIAllocator &allocator, ObString &json_str)
-{
   int ret = OB_SUCCESS;
-  FILE *fp = fopen(TELEMETRY_FILE_NAME, "rb");
-  if (OB_ISNULL(fp)) {
-    ret = ENOENT == errno ? OB_FILE_NOT_EXIST : OB_IO_ERROR;
-  } else {
-    const int64_t max_size = 64 * 1024;
-    char *buf = static_cast<char *>(allocator.alloc(max_size));
-    if (OB_ISNULL(buf)) {
-      ret = OB_ALLOCATE_MEMORY_FAILED;
-    } else {
-      const size_t size = fread(buf, 1, max_size, fp);
-      if (0 != ferror(fp)) {
-        ret = OB_IO_ERROR;
-      } else if (size == max_size) {
-        ret = OB_SIZE_OVERFLOW;
-      } else if (0 == size) {
-        ret = OB_INVALID_ARGUMENT;
-      } else {
-        json_str.assign_ptr(buf, static_cast<int64_t>(size));
-      }
-    }
-    fclose(fp);
-  }
-  return ret;
-}
-
-static int parse_telemetry_file(ObIAllocator &allocator, const ObString &json_str,
-                              ObJsonObject *&root, ObJsonBoolean *&sent)
-{
-  int ret = OB_SUCCESS;
-  ObJsonNode *node = nullptr;
-  root = nullptr;
-  sent = nullptr;
-  if (OB_FAIL(ObJsonParser::get_tree(&allocator, json_str.ptr(), json_str.length(), node))) {
-  } else if (OB_ISNULL(node) || ObJsonNodeType::J_OBJECT != node->json_type()) {
-    ret = OB_INVALID_ARGUMENT;
-  } else {
-    root = static_cast<ObJsonObject *>(node);
-    ObJsonNode *content = root->get_value("content");
-    ObJsonNode *component = root->get_value("component");
-    ObJsonNode *created_at = root->get_value("createdAtUs");
-    ObJsonNode *sent_node = root->get_value("sent");
-    if (OB_ISNULL(content) || ObJsonNodeType::J_OBJECT != content->json_type()
-        || OB_ISNULL(component) || ObJsonNodeType::J_STRING != component->json_type()) {
-      ret = OB_INVALID_ARGUMENT;
-    } else if (OB_ISNULL(created_at) && OB_ISNULL(sent_node)) {
-      // Older files were only payload dumps, with no reliable delivery state.
-      ret = OB_ENTRY_NOT_EXIST;
-    } else if (OB_ISNULL(created_at)
-        || !((ObJsonNodeType::J_INT == created_at->json_type() && created_at->get_int() > 0)
-            || (ObJsonNodeType::J_UINT == created_at->json_type()
-                && created_at->get_uint() > 0 && created_at->get_uint() <= INT64_MAX))
-        || OB_ISNULL(sent_node) || ObJsonNodeType::J_BOOLEAN != sent_node->json_type()) {
-      ret = OB_INVALID_ARGUMENT;
-    } else {
-      ObJsonNode *id = static_cast<ObJsonObject *>(content)->get_value("id");
-      unsigned char id_bytes[TELEMETRY_MACHINE_ID_BYTE_LENGTH] = {0};
-      if (OB_ISNULL(id) || ObJsonNodeType::J_STRING != id->json_type()) {
-        ret = OB_INVALID_ARGUMENT;
-      } else if (OB_FAIL(parse_telemetry_uuid_text(
-          id->get_data(), id->get_data_length(), id_bytes, sizeof(id_bytes)))) {
-      } else {
-        sent = static_cast<ObJsonBoolean *>(sent_node);
-      }
-    }
-  }
-  return ret;
-}
-
-static size_t discard(void* ptr, size_t size, size_t nmemb, void* userdata) {
-  return size * nmemb;
-}
-
-int send_telemetry_by_libcurl(const char *url, const ObString &json_str)
-{
-  int ret = OB_SUCCESS;
-  CURL *curl = curl_easy_init();
-  if (curl == nullptr) {
-    LOG_WARN("Failed to init curl");
+  oceanbase::http::ClientConfig config;
+  config.timeout_ms = 1000;
+  config.connect_timeout_ms = 1000;
+  config.https_only = true;
+  config.follow_redirects = true;
+  config.max_redirects = 3;
+  config.verify_peer = false;
+  config.verify_host = true;
+  config.discard_body = true;
+  config.accept_gzip = false;
+  auto client = oceanbase::http::new_http_client(rust::Str(url), config);
+  if (oceanbase::http::Code::Ok != oceanbase::http::http_client_add_header(
+          *client, rust::Str("Content-Type: application/json"))) {
     ret = OB_CURL_ERROR;
   } else {
-    CURLcode cc = CURLE_OK;
-    struct curl_slist *list = NULL;
-    // set post options
-    if (NULL == (list = curl_slist_append(list, "Content-Type: application/json"))) {
+    auto reply = oceanbase::http::http_post(
+        *client, rust::Slice<const uint8_t>(
+            reinterpret_cast<const uint8_t *>(json_str.ptr()), json_str.length()));
+    const auto result = oceanbase::http::http_reply_result(*reply);
+    if (oceanbase::http::Code::Ok != result.code) {
+      LOG_WARN("Failed to perform HTTP request", K(result.transport_code));
       ret = OB_CURL_ERROR;
-    } else {
-      curl_easy_setopt(curl, CURLOPT_URL, url);
-      // Skip CA trust verification to avoid depending on distro-specific CA bundle paths.
-      // Hostname verification remains enabled, but this does not authenticate the peer.
-      curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-      curl_easy_setopt(curl, CURLOPT_HTTPHEADER, list);
-      curl_easy_setopt(curl, CURLOPT_POST, 1L);
-      curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, json_str.length());
-      curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_str.ptr());
-      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, discard);
-      curl_easy_setopt(curl, CURLOPT_WRITEDATA, NULL);
-
-      // set other options
-      const int64_t no_signal = 1;
-      const int64_t timeout_ms = 1000; // 1s
-      const int64_t no_delay = 1;
-      const int64_t max_redirect = 3; // set max redirect
-      const int64_t follow_location = 1; // for http redirect 301 302
-      curl_easy_setopt(curl, CURLOPT_NOSIGNAL, no_signal);
-      curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
-      curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, timeout_ms);
-      curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, no_delay);
-      curl_easy_setopt(curl, CURLOPT_MAXREDIRS, max_redirect);
-      curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, follow_location);
-
-      // Only a successful HTTP response permits persisting sent=true.
-      long http_code = 0;
-      if (CURLE_OK != (cc = curl_easy_perform(curl))) {
-        LOG_WARN("Failed to perform curl", K(cc));
-        ret = OB_CURL_ERROR;
-      } else if (CURLE_OK != (cc = curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code))
-          || http_code < 200 || http_code >= 300) {
-        ret = OB_CURL_ERROR;
-        LOG_WARN("Telemetry endpoint rejected report", K(cc), K(http_code));
-      }
-      curl_slist_free_all(list);
+    } else if (result.http_status < 200 || result.http_status >= 300) {
+      ret = OB_CURL_ERROR;
+      LOG_WARN("Telemetry endpoint rejected report", K(result.http_status));
     }
-    curl_easy_cleanup(curl);
   }
   return ret;
+#endif
 }
 
 int send_telemetry(const char *url, const ObString &json_str)
@@ -1436,64 +1266,64 @@ int send_telemetry(const char *url, const ObString &json_str)
   if (OB_ISNULL(url) || json_str.empty()) {
     ret = OB_INVALID_ARGUMENT;
   } else {
-    ret = send_telemetry_by_libcurl(url, json_str);
+    ret = send_telemetry_by_http(url, json_str);
   }
   return ret;
 }
 
 bool is_telemetry_enabled()
 {
+#ifdef __EMSCRIPTEN__
+  // The browser host owns optional telemetry and its transport configuration.
+  return false;
+#else
   bool bret = true;
   const char* telemetry_enabled = getenv("TELEMETRY_ENABLED");
   if (NULL != telemetry_enabled && 0 == STRCMP(telemetry_enabled, "false")) {
     bret = false;
   }
   return bret;
+#endif
 }
 
-int report_telemetry(const char *reporter, const char *event_name)
+int report_telemetry(LocalStore &store, const char *reporter, const char *event_name)
 {
+  using namespace telemetry;
   int ret = OB_SUCCESS;
-  // Serialize concurrent callers through the read/send/update transaction.
-  // The server's base-directory process lock excludes other server processes.
+  // Serialize telemetry callers; local transactions never span the HTTP request.
   static std::mutex report_mutex;
   std::lock_guard<std::mutex> guard(report_mutex);
-  common::ObArenaAllocator allocator;
-  ObString json_str;
-  ObJsonObject *root = nullptr;
-  ObJsonBoolean *sent = nullptr;
-  const int read_ret = read_telemetry_file(allocator, json_str);
-  if (OB_SUCCESS == read_ret) {
-    ret = parse_telemetry_file(allocator, json_str, root, sent);
-  } else {
-    ret = read_ret;
-  }
-  if (OB_FILE_NOT_EXIST == read_ret || (OB_SUCCESS == read_ret && OB_ENTRY_NOT_EXIST == ret)) {
-    // The file's logical creation time is immutable, unlike filesystem mtime
-    // or ctime, which change when delivery state is updated or files are copied.
+  ObSqlString payload;
+  bool sent = false;
+  ret = store.query(LocalRequest::select(telemetry::schema(), {Payload, Sent}).eq(Id, int64_t(0)),
+      [&](LocalRowReader &row) {
+        int size = 0;
+        const char *data = row.get_text(0, &size);
+        const int64_t state = row.get_int64(1);
+        sent = state == 1;
+        return data == nullptr || size <= 0 || (state != 0 && state != 1)
+            ? OB_INVALID_DATA : payload.assign(data, size);
+      });
+  if (OB_ENTRY_NOT_EXIST == ret) {
+    common::ObArenaAllocator allocator;
+    ObString json_str;
     const int64_t created_at_us = ObTimeUtility::current_time();
     if (OB_FAIL(generate_telemetry_json(reporter, event_name, &allocator, json_str, created_at_us))) {
-    } else if (OB_FAIL(write_telemetry_file(json_str))) {
-    } else if (OB_FAIL(parse_telemetry_file(allocator, json_str, root, sent))) {
+    } else if (OB_FAIL(payload.assign(json_str))) {
+    } else if (OB_FAIL(store.execute(LocalRequest::insert(telemetry::schema()).set(Id, int64_t(0))
+        .set(Payload, LocalValue::text(payload.ptr(), payload.length())).set(Sent, int64_t(0))))) {
     }
   }
   if (OB_FAIL(ret)) {
     LOG_WARN("Failed to prepare telemetry state", K(ret));
-  } else if (!sent->get_boolean() && is_telemetry_enabled()) {
-    // Keep local delivery metadata out of the endpoint's payload schema.
-    ObJsonObject payload(&allocator);
-    ObJsonBuffer payload_buf(&allocator);
-    ObJsonBuffer state_buf(&allocator);
-    if (OB_FAIL(payload.add("content", root->get_value("content")))) {
-    } else if (OB_FAIL(payload.add("component", root->get_value("component")))) {
-    } else if (OB_FAIL(payload.print(payload_buf, false))) {
-    } else if (OB_FAIL(send_telemetry(TELEMETRY_URL,
-        ObString(payload_buf.length(), payload_buf.ptr())))) {
-    } else {
-      sent->set_value(true);
-      if (OB_FAIL(root->print(state_buf, false))) {
-      } else if (OB_FAIL(write_telemetry_file(ObString(state_buf.length(), state_buf.ptr())))) {
-      }
+  } else if (!sent && is_telemetry_enabled()) {
+    int64_t affected = 0;
+    if (OB_FAIL(send_telemetry(TELEMETRY_URL, ObString(payload.length(), payload.ptr())))) {
+    } else if (OB_FAIL(store.execute(LocalRequest::update(telemetry::schema()).eq(Id, int64_t(0))
+        .set(Sent, int64_t(1)), &affected))) {
+      LOG_WARN("Failed to persist telemetry delivery state", K(ret));
+    } else if (affected != 1) {
+      ret = OB_ERR_UNEXPECTED;
     }
   }
   return ret;

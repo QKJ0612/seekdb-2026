@@ -25,6 +25,7 @@ namespace oceanbase
 namespace share
 {
 class ObLocalDevice;
+struct LocalIOConfig;
 class ObILocalDeviceSpaceProvider;
 
 class ObGetFileIdRangeFunctor : public common::ObBaseDirEntryOperator
@@ -38,7 +39,7 @@ public:
   }
   virtual ~ObGetFileIdRangeFunctor() = default;
 
-  virtual int func(const dirent *entry) override;
+  virtual int func(const common::ObPlatformDirEntry &entry) override;
   uint32_t get_min_file_id() const { return min_file_id_; }
   uint32_t get_max_file_id() const { return max_file_id_; }
 private:
@@ -58,7 +59,7 @@ public:
   }
   virtual ~ObGetFileSizeFunctor() = default;
 
-  virtual int func(const dirent *entry) override;
+  virtual int func(const common::ObPlatformDirEntry &entry) override;
   int64_t get_total_size() const { return total_size_; }
 private:
   const char* dir_;
@@ -73,7 +74,7 @@ public:
   ObScanDirOp(const char *dir = nullptr)
    : dir_(dir) {}
   virtual ~ObScanDirOp() = default;
-  virtual int func(const dirent *entry) override;
+  virtual int func(const common::ObPlatformDirEntry &entry) override;
   int set_dir(const char *dir);
   const char *get_dir() const { return dir_; }
   TO_STRING_KV(K_(dir));
@@ -94,7 +95,8 @@ public:
       const int64_t block_size,
       const int64_t data_disk_percentage,
       const int64_t data_disk_size,
-      const ObILocalDeviceSpaceProvider &space_provider);
+      const ObILocalDeviceSpaceProvider &space_provider,
+      const LocalIOConfig &io_config);
   void destroy();
 
   ObIODevice &get_local_device();
@@ -128,7 +130,6 @@ public:
       free_block_array_(free_block_array), block_bitmap_(block_bitmap),
       free_block_cnt_(free_block_cnt), free_block_push_pos_(free_block_push_pos),
       free_block_pop_pos_(free_block_pop_pos), device_name_(device_name) {}
-  virtual ~BlockFileAttr() {}
   TO_STRING_KV(K_(store_path), K_(block_sstable_dir_name), K_(block_sstable_file_name), K_(block_fd),
     K_(block_file_size), K_(block_size), K_(total_block_cnt), KP_(free_block_array), KP_(block_bitmap),
     K_(free_block_cnt), K_(free_block_push_pos), K_(free_block_pop_pos), K_(device_name));
@@ -162,7 +163,8 @@ public:
   static int rmdir(const char *pathname);
   static int unlink(const char *pathname);
   static int rename(const char *oldpath, const char *newpath);
-  static int scan_dir(const char *dir_name, int (*func)(const dirent *entry));
+  static int scan_dir(const char *dir_name,
+                      int (*func)(const common::ObPlatformDirEntry &entry));
   static int scan_dir(const char *dir_name, common::ObBaseDirEntryOperator &op);
   static int scan_dir_rec(const char *dir_name, ObScanDirOp &reg_op, ObScanDirOp &dir_op);
   static int fsync(const common::ObIOFd &fd);
@@ -230,7 +232,7 @@ public:
                              const int64_t file_size,
                              const int64_t disk_percentage,
                              const int64_t reserved_size,
-                             bool &is_exist,
+                             const LocalIOConfig &io_config,
                              BlockFileAttr &block_file_attr);
 };
 

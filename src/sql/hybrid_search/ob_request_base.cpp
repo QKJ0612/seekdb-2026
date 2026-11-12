@@ -16,6 +16,8 @@
 
 #define USING_LOG_PREFIX SERVER
 #include "ob_request_base.h"
+#include <inttypes.h>
+#include "lib/utility/utility.h"
 #define IS_LOGICAL_OPERATOR(type) ((type) == T_OP_AND || (type) == T_OP_OR || (type) == T_OP_XOR)
 #define IS_SIMPLIFIABLE_OPERATOR(type) (IS_LOGICAL_OPERATOR(type) || \
                                         (type) == T_OP_ADD || \
@@ -339,9 +341,14 @@ int ObReqConstExpr::translate_expr(ObObjPrintParams &print_params_, char *buf_, 
   } else if (var_type_ == ObNullType) {
     PRINT_IDENT("NULL");
   } else {
-    DATA_PRINTF("'");
-    PRINT_IDENT(expr_name);
-    DATA_PRINTF("'");
+    // JSON strings are UTF-8 text. Keep a character literal (including JSON
+    // object keys), with normal literal coercibility, while hex encoding makes
+    // quotes, backslashes and NUL independent of NO_BACKSLASH_ESCAPES.
+    ObSqlString literal;
+    if (OB_FAIL(sql_append_hex_escape_str(expr_name, literal))) {
+    } else {
+      DATA_PRINTF("_utf8mb4 %.*s", literal.string().length(), literal.string().ptr());
+    }
   }
   if (OB_SUCC(ret) && need_alias && translate_alias(print_params_, buf_, buf_len_, pos_)) {
   }
@@ -746,14 +753,14 @@ int ObReqConstExpr::set_numeric(ObIAllocator &alloc, double numeric_value, ObObj
       case ObMediumIntType:
       case ObInt32Type:
       case ObIntType:
-        len = snprintf(buf, sizeof(buf), "%ld", static_cast<int64_t>(numeric_value));
+        len = snprintf(buf, sizeof(buf), "%" PRId64, static_cast<int64_t>(numeric_value));
         break;
       case ObUTinyIntType:
       case ObUSmallIntType:
       case ObUMediumIntType:
       case ObUInt32Type:
       case ObUInt64Type:
-        len = snprintf(buf, sizeof(buf), "%lu", static_cast<uint64_t>(numeric_value));
+        len = snprintf(buf, sizeof(buf), "%" PRIu64, static_cast<uint64_t>(numeric_value));
         break;
       case ObFloatType:
         len = snprintf(buf, sizeof(buf), "%.7g", numeric_value);

@@ -14,7 +14,8 @@
  * limitations under the License.
  */
 
-#include "config_bridge.h"
+#include "rust/config.h"
+#include <inttypes.h>
 #include "ob_memtable_context.h"
 #include "storage/tx/ob_tx_ctx.h"
 #include "storage/tablelock/ob_lock_memtable.h"
@@ -40,10 +41,6 @@ ObMemtableCtx::ObMemtableCtx()
       query_allocator_(),
       ctx_cb_allocator_(),
       ctx_(NULL),
-      truncate_cnt_(0),
-      lock_for_read_retry_count_(0),
-      lock_for_read_elapse_(0),
-      trans_mem_total_size_(0),
       unsubmitted_cnt_(0),
       callback_mem_used_(0),
       callback_alloc_count_(0),
@@ -134,10 +131,6 @@ void ObMemtableCtx::reset()
     callback_alloc_count_ = 0;
     callback_mem_used_ = 0;
     has_row_updated_ = false;
-    trans_mem_total_size_ = 0;
-    lock_for_read_retry_count_ = 0;
-    lock_for_read_elapse_ = 0;
-    truncate_cnt_ = 0;
     unsubmitted_cnt_ = 0;
     mem_ctx_obj_pool_.reset();
     lock_mem_ctx_.reset();
@@ -165,17 +158,17 @@ int64_t ObMemtableCtx::to_string(char *buf, const int64_t buf_len) const
   common::databuff_printf(buf, buf_len, pos, "{");
   pos += ObIMvccCtx::to_string(buf + pos, buf_len - pos);
   common::databuff_printf(buf, buf_len, pos,
-                          " end_code=%d tx_status=%ld is_readonly=%s "
-                          "ref=%ld", end_code_, tx_status_, STR_BOOL(is_read_only_), ref_);
+                          " end_code=%d tx_status=%" PRId64 " is_readonly=%s "
+                          "ref=%" PRId64 "", end_code_, tx_status_, STR_BOOL(is_read_only_), ref_);
   common::databuff_printf(buf, buf_len, pos, " trans_id=");
   if (OB_ISNULL(ctx_)) {
     common::databuff_printf(buf, buf_len, pos, "");
   } else {
     common::databuff_printf(buf, buf_len, pos, ctx_->get_trans_id());
   }
-  common::databuff_printf(buf, buf_len, pos, " row_callback[alloc:%ld, free:%ld, unsubmit:%ld] "
-                          "redo[fill:%ld,sync_succ:%ld, sync_fail:%ld] "
-                          "main_list_len=%ld pending_log_size=%ld ",
+  common::databuff_printf(buf, buf_len, pos, " row_callback[alloc:%" PRId64 ", free:%" PRId64 ", unsubmit:%" PRId64 "] "
+                          "redo[fill:%" PRId64 ",sync_succ:%" PRId64 ", sync_fail:%" PRId64 "] "
+                          "main_list_len=%" PRId64 " pending_log_size=%" PRId64 " ",
                           callback_alloc_count_, callback_free_count_, unsubmitted_cnt_,
                           log_gen_.get_redo_filled_count(),
                           log_gen_.get_redo_sync_succ_count(),
@@ -681,20 +674,6 @@ int ObMemtableCtx::get_callback_list_stat(ObIArray<ObTxCallbackListStat> &stats)
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-
-void ObMemtableCtx::inc_lock_for_read_retry_count()
-{
-  lock_for_read_retry_count_++;
-}
-
-void ObMemtableCtx::add_trans_mem_total_size(const int64_t size)
-{
-  if (size < 0) {
-    TRANS_LOG_RET(ERROR, OB_ERR_UNEXPECTED, "unexpected size", K(size), K(*this));
-  } else {
-    ATOMIC_FAA(&trans_mem_total_size_, size);
-  }
-}
 
 int ObMemtableCtx::get_memtable_key_arr(transaction::ObMemtableKeyArray &memtable_key_arr)
 {

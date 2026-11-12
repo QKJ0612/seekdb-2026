@@ -17,6 +17,7 @@
 #ifndef  OCEANBASE_COMMON_HASH_HASHTABLE_
 #define  OCEANBASE_COMMON_HASH_HASHTABLE_
 #include <stdlib.h>
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <pthread.h>
@@ -244,17 +245,13 @@ private:
 template<class _value_type, class _lock_type, class _cond_type = NCond>
 struct ObHashTableBucket : public MProtect
 {
-  mutable _lock_type lock;
-  mutable _cond_type cond;
+  mutable HashSync<_lock_type> lock;
+  mutable HashSync<_cond_type> cond;
   ObHashTableNode<_value_type> *node;
 
-  ObHashTableBucket() : node(NULL)
-  {
-#if defined(__APPLE__) || defined(_WIN32)
-    init_hash_lock(lock);
-    init_hash_cond(cond);
-#endif
-  }
+  ObHashTableBucket() : node(NULL) {}
+
+  bool sync_initialized() const { return lock.is_initialized() && cond.is_initialized(); }
 
   typedef ObHashTableBucketNodeIterator<_value_type, _lock_type, _cond_type> iterator;
   typedef ObHashTableBucketNodeConstIterator<_value_type, _lock_type, _cond_type> const_iterator;
@@ -283,6 +280,7 @@ struct ObHashTableBucket<_value_type,
 {
   ObHashTableNode<_value_type> *node;
   ObHashTableBucket() : node(NULL) {}
+  bool sync_initialized() const { return true; }
 };
 
 template<class _value_type, class _defendmode>
@@ -297,11 +295,11 @@ struct ObBucketLockCond
   }
   typename _defendmode::lock_type &lock()
   {
-    return bucket_.lock;
+    return bucket_.lock.get();
   }
   typename _defendmode::cond_type &cond()
   {
-    return bucket_.cond;
+    return bucket_.cond.get();
   }
 private:
   bucket_type &bucket_;
@@ -823,11 +821,12 @@ public:
   int create(int64_t bucket_num, _allocer *allocer, _bucket_allocer *bucket_allocer)
   {
     int ret = OB_SUCCESS;
-    if (OB_UNLIKELY(0 >= bucket_num) || OB_UNLIKELY(NULL == allocer)) {
-      HASH_WRITE_LOG(HASH_WARNING, "invalid param bucket_num=%ld allocer=%p", bucket_num, allocer);
+    if (OB_UNLIKELY(0 >= bucket_num) || OB_UNLIKELY(NULL == allocer)
+        || OB_UNLIKELY(NULL == bucket_allocer)) {
+      HASH_WRITE_LOG(HASH_WARNING, "invalid param bucket_num=%" PRId64 " allocer=%p", bucket_num, allocer);
       ret = OB_INVALID_ARGUMENT;
     } else if (OB_UNLIKELY(inited(buckets_))) {
-      HASH_WRITE_LOG(HASH_WARNING, "hashtable has already been created allocer=%p bucket_num=%ld",
+      HASH_WRITE_LOG(HASH_WARNING, "hashtable has already been created allocer=%p bucket_num=%" PRId64 "",
                      allocer_, bucket_num_);
       ret = OB_INIT_TWICE;
     } else if (OB_UNLIKELY(0 != (ret = hash::create(buckets_, bucket_num, ARRAY_SIZE,
@@ -835,10 +834,19 @@ public:
       HASH_WRITE_LOG(HASH_WARNING, "create buckets fail, ret=%d", ret);
       ret = OB_ALLOCATE_MEMORY_FAILED;
     } else {
-      //memset(buckets_, 0, sizeof(hashbucket) * bucket_num);
-      bucket_num_ = bucket_num;
-      allocer_ = allocer;
-      bucket_allocer_ = bucket_allocer;
+      for (int64_t i = 0; OB_SUCC(ret) && i < bucket_num; ++i) {
+        if (OB_UNLIKELY(!buckets_[i].sync_initialized())) {
+          HASH_WRITE_LOG_RET(HASH_WARNING, OB_INIT_FAIL, "init bucket synchronization failed");
+          ret = OB_INIT_FAIL;
+        }
+      }
+      if (OB_SUCC(ret)) {
+        bucket_num_ = bucket_num;
+        allocer_ = allocer;
+        bucket_allocer_ = bucket_allocer;
+      } else {
+        hash::destroy(buckets_, *bucket_allocer, bucket_num);
+      }
     }
     return ret;
   }
@@ -864,7 +872,7 @@ public:
       allocer_ = NULL;
       //delete[] buckets_;
       //buckets_ = NULL;
-      hash::destroy(buckets_, *bucket_allocer_);
+      hash::destroy(buckets_, *bucket_allocer_, bucket_num_);
       bucket_num_ = 0;
       size_ = 0;
     }
@@ -928,7 +936,7 @@ public:
       HASH_WRITE_LOG(HASH_WARNING, "hashtable not init, backtrace=%s", lbt());
     } else if (OB_UNLIKELY((bucket_pos < 0) || (bucket_pos >= bucket_num_))) {
       ret = OB_INVALID_ARGUMENT;
-      HASH_WRITE_LOG(HASH_WARNING, "invalid bucket pos, bucket_pos = %ld, bucket_num = %ld",
+      HASH_WRITE_LOG(HASH_WARNING, "invalid bucket pos, bucket_pos = %" PRId64 ", bucket_num = %" PRId64 "",
                      bucket_pos, bucket_num_);
     } else {
       bucket = &buckets_[bucket_pos];
@@ -1218,7 +1226,7 @@ public:
       HASH_WRITE_LOG(HASH_WARNING, "hash key failed, ret = %d", ret);
     } else if (1 < EXTEND_RATIO && size_ >= bucket_num_) {
       if (OB_FAIL(extend())) {
-        HASH_WRITE_LOG(HASH_WARNING, "failed to extend, ret = %d, bucket_num = %ld, size = %ld",
+        HASH_WRITE_LOG(HASH_WARNING, "failed to extend, ret = %d, bucket_num = %" PRId64 ", size = %" PRId64 "",
                                       ret, bucket_num_, size_);
       }
     }
@@ -1327,7 +1335,7 @@ public:
           }
         }
       }
-      hash::destroy(old_buckets, *bucket_allocer_);
+      hash::destroy(old_buckets, *bucket_allocer_, old_bucket_num);
     }
 
     return ret;
@@ -1575,9 +1583,9 @@ public:
       ret = OB_NOT_INIT;
     } else if (OB_FAIL(hash::serialization(archive, bucket_num_))) {
       HASH_WRITE_LOG(HASH_WARNING,
-                     "serialize hash bucket_num fail bucket_num=%ld, ret=%d", bucket_num_, ret);
+                     "serialize hash bucket_num fail bucket_num=%" PRId64 ", ret=%d", bucket_num_, ret);
     } else if (OB_FAIL(hash::serialization(archive, size_))) {
-      HASH_WRITE_LOG(HASH_WARNING, "serialize hash size fail size=%ld, ret=%d", size_, ret);
+      HASH_WRITE_LOG(HASH_WARNING, "serialize hash size fail size=%" PRId64 ", ret=%d", size_, ret);
     } else if (size_ > 0) {
       for (iterator iter = begin(); OB_SUCC(ret) && iter != end(); iter++) {
         if (OB_FAIL(hash::serialization(archive, *iter))) {
@@ -1600,7 +1608,7 @@ public:
       ret = OB_INVALID_ARGUMENT;
     } else if (OB_FAIL(hash::deserialization(archive, bucket_num))
                || OB_UNLIKELY(0 >= bucket_num)) {
-      HASH_WRITE_LOG(HASH_WARNING, "deserialize bucket_num fail, ret=%d, bucket_num=%ld",
+      HASH_WRITE_LOG(HASH_WARNING, "deserialize bucket_num fail, ret=%d, bucket_num=%" PRId64 "",
           ret, bucket_num);
       if (OB_SUCC(ret)) {
         ret = OB_ERR_UNEXPECTED;
@@ -1611,14 +1619,14 @@ public:
       if (OB_UNLIKELY(inited(buckets_)) && OB_UNLIKELY(NULL != allocer_)) {
         destroy();
       }
-      if (OB_SUCC(create(bucket_num, allocer, bucket_allocer_))) {
+      if (OB_SUCC(ret = create(bucket_num, allocer, bucket_allocer_))) {
         _value_type value;
         for (int64_t i = 0; OB_SUCC(ret) && i < size; i++) {
           if (OB_FAIL(hash::deserialization(archive, value))) {
             HASH_WRITE_LOG(HASH_WARNING,
-                           "deserialize item fail num=%ld, ret=%d", i, ret);
+                           "deserialize item fail num=%" PRId64 ", ret=%d", i, ret);
           } else if (OB_FAIL(set_refactored(getkey_(value), value))) {
-            HASH_WRITE_LOG(HASH_WARNING, "insert item fail num=%ld, ret=%d", i, ret);
+            HASH_WRITE_LOG(HASH_WARNING, "insert item fail num=%" PRId64 ", ret=%d", i, ret);
           } else {
             // do nothing
           }

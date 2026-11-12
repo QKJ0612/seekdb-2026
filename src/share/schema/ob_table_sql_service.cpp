@@ -15,7 +15,9 @@
  */
 
 #define USING_LOG_PREFIX SHARE_SCHEMA
+#include "share/schema/ob_schema_getter_guard.h"
 #include "ob_table_sql_service.h"
+#include <inttypes.h>
 #include "lib/literals/ob_literals.h"
 #include "share/ob_global_stat_proxy.h"
 #include "share/schema/ob_constraint.h"
@@ -159,7 +161,7 @@ int ObTableSqlService::delete_table_part_info(const ObTableSchema &table_schema,
               0 == STRCMP(tname[i], OB_ALL_DEF_SUB_PART_TNAME))) {
           continue;
         }
-        if (OB_FAIL(sql.assign_fmt("DELETE FROM %s WHERE table_id=%lu",
+        if (OB_FAIL(sql.assign_fmt("DELETE FROM %s WHERE table_id=%" PRIu64 "",
                                    tname[i],
                                    ObSchemaUtils::get_extract_schema_id(table_schema.get_table_id())))) {
         } else if (OB_FAIL(sql_client.write(sql.ptr(), affected_rows))) {
@@ -200,11 +202,11 @@ int ObTableSqlService::drop_inc_partition_add_extra_str(const ObTableSchema &inc
     ObPartition *part = part_array[i];
     if (OB_ISNULL(part)) {
       ret = OB_ERR_UNEXPECTED;
-    } else if (OB_FAIL(sql.append_fmt(" OR part_id = %lu", part->get_part_id()))) {
-    } else if (OB_FAIL(condition_str.append_fmt(" OR partition_id = %lu",
+    } else if (OB_FAIL(sql.append_fmt(" OR part_id = %" PRIu64 "", part->get_part_id()))) {
+    } else if (OB_FAIL(condition_str.append_fmt(" OR partition_id = %" PRIu64 "",
                                                 part->get_part_id()))) {
     } else if (inc_table.get_part_level() == PARTITION_LEVEL_ONE &&
-               OB_FAIL(dml_info_cond_str.append_fmt(" OR tablet_id = %lu",
+               OB_FAIL(dml_info_cond_str.append_fmt(" OR tablet_id = %" PRIu64 "",
                                                       part->get_tablet_id().id()))) {
     } else {
       // get subpartition info
@@ -212,9 +214,9 @@ int ObTableSqlService::drop_inc_partition_add_extra_str(const ObTableSchema &inc
         ObSubPartition *subpart = part->get_subpart_array()[j];
         if (OB_ISNULL(subpart)) {
           ret = OB_ERR_UNEXPECTED;
-        } else if (OB_FAIL(condition_str.append_fmt(" OR partition_id = %lu",
+        } else if (OB_FAIL(condition_str.append_fmt(" OR partition_id = %" PRIu64 "",
                                                     subpart->get_sub_part_id()))) {
-        } else if (OB_FAIL(dml_info_cond_str.append_fmt(" OR tablet_id = %lu",
+        } else if (OB_FAIL(dml_info_cond_str.append_fmt(" OR tablet_id = %" PRIu64 "",
                                                           subpart->get_tablet_id().id()))) {
         }
       }
@@ -255,7 +257,7 @@ int ObTableSqlService::drop_inc_partition(common::ObISQLClient &sql_client,
     // build sql string
     if (OB_ISNULL(part_array)) {
       ret = OB_ERR_UNEXPECTED;
-    } else if (OB_FAIL(sql.assign_fmt("DELETE FROM %s WHERE table_id=%lu",
+    } else if (OB_FAIL(sql.assign_fmt("DELETE FROM %s WHERE table_id=%" PRIu64 "",
                                       OB_ALL_PART_TNAME,
                                       ObSchemaUtils::get_extract_schema_id(table_id)))) {
     } else if (!is_truncate_table) {
@@ -306,7 +308,7 @@ int ObTableSqlService::drop_inc_sub_partition(common::ObISQLClient &sql_client,
     // build sql string
     if (OB_ISNULL(part_array)) {
       ret = OB_ERR_UNEXPECTED;
-    } else if (OB_FAIL(sql.assign_fmt("DELETE FROM %s WHERE table_id=%lu AND (0 = 1",
+    } else if (OB_FAIL(sql.assign_fmt("DELETE FROM %s WHERE table_id=%" PRIu64 " AND (0 = 1",
                                       OB_ALL_SUB_PART_TNAME,
                                       ObSchemaUtils::get_extract_schema_id(table_id)))) {
     } else if (OB_FAIL(condition_str.assign_fmt("( 1 = 0"))) {
@@ -325,10 +327,10 @@ int ObTableSqlService::drop_inc_sub_partition(common::ObISQLClient &sql_client,
           ObSubPartition *subpart = part->get_subpart_array()[j];
           if (OB_ISNULL(subpart)) {
             ret = OB_ERR_UNEXPECTED;
-          } else if (OB_FAIL(sql.append_fmt(" OR (part_id = %lu AND sub_part_id = %lu)",
+          } else if (OB_FAIL(sql.append_fmt(" OR (part_id = %" PRIu64 " AND sub_part_id = %" PRIu64 ")",
                      subpart->get_part_id(), subpart->get_sub_part_id()))) {
-          } else if (OB_FAIL(condition_str.append_fmt(" OR partition_id = %lu", subpart->get_sub_part_id()))) {
-          } else if (OB_FAIL(dml_info_cond_str.append_fmt(" OR tablet_id = %lu", subpart->get_tablet_id().id()))) {
+          } else if (OB_FAIL(condition_str.append_fmt(" OR partition_id = %" PRIu64 "", subpart->get_sub_part_id()))) {
+          } else if (OB_FAIL(dml_info_cond_str.append_fmt(" OR tablet_id = %" PRIu64 "", subpart->get_tablet_id().id()))) {
           }
         }
       }
@@ -373,7 +375,7 @@ int ObTableSqlService::drop_inc_all_sub_partition_add_extra_str(const ObTableSch
     ObPartition *part = part_array[i];
     if (OB_ISNULL(part)) {
       ret = OB_ERR_UNEXPECTED;
-    } else if (OB_FAIL(sql.append_fmt(" OR (part_id = %lu)", part->get_part_id()))) {
+    } else if (OB_FAIL(sql.append_fmt(" OR (part_id = %" PRIu64 ")", part->get_part_id()))) {
     }
   }
   if (OB_SUCC(ret)) {
@@ -403,7 +405,7 @@ int ObTableSqlService::drop_inc_all_sub_partition(common::ObISQLClient &sql_clie
     // build sql string
     if (OB_ISNULL(part_array)) {
       ret = OB_ERR_UNEXPECTED;
-    } else if (OB_FAIL(sql.assign_fmt("DELETE FROM %s WHERE table_id=%lu",
+    } else if (OB_FAIL(sql.assign_fmt("DELETE FROM %s WHERE table_id=%" PRIu64 "",
                                       OB_ALL_SUB_PART_TNAME,
                                       ObSchemaUtils::get_extract_schema_id(ori_table.get_table_id())))) {
     } else if (!is_truncate_table) {
@@ -1315,7 +1317,9 @@ int ObTableSqlService::rename_csts_in_inner_table(common::ObISQLClient &sql_clie
     int64_t affected_rows = 0;
     // `drop table` modify constraint_name but do not modify name_generated_type
     const ObNameGeneratedType name_generated_type = (*iter)->get_name_generated_type();
-    if (OB_FAIL(ObTableSchema::create_cons_name_automatically(new_cst_name, table_schema.get_table_name_str(), allocator, (*iter)->get_constraint_type()))) {
+    if (OB_FAIL(ObTableSchema::create_cons_name_for_recyclebin(new_cst_name,
+        allocator, (*iter)->get_constraint_type(), table_schema.get_table_id(),
+        (*iter)->get_constraint_id()))) {
     } else if (OB_FAIL(gen_constraint_update_name_dml(new_cst_name, name_generated_type, new_schema_version, **iter, dml_for_update))) {
     } else if (OB_FAIL(exec_update(sql_client, table_schema.get_table_id(),
                                    OB_ALL_CONSTRAINT_TNAME, dml_for_update, affected_rows))) {
@@ -1357,24 +1361,24 @@ int ObTableSqlService::delete_constraint(common::ObISQLClient &sql_client,
     } else if (cst_iter == table_schema.constraint_begin()) {
       if (OB_FAIL(constraint_history_sql.assign_fmt(
           "INSERT INTO %s(table_id, constraint_id, schema_version, is_deleted)"
-          " VALUES(%lu, %lu, %ld, %ld)",
+          " VALUES(%" PRIu64 ", %" PRIu64 ", %" PRId64 ", %" PRId64 ")",
           OB_ALL_CONSTRAINT_HISTORY_TNAME,
           ObSchemaUtils::get_extract_schema_id((*cst_iter)->get_table_id()),
           (*cst_iter)->get_constraint_id(), new_schema_version, is_deleted))) {
       } else if (OB_FAIL(constraint_sql.assign_fmt(
             "DELETE FROM %s WHERE (table_id, constraint_id)"
-            " IN ((%lu, %lu)",
+            " IN ((%" PRIu64 ", %" PRIu64 ")",
             OB_ALL_CONSTRAINT_TNAME,
             ObSchemaUtils::get_extract_schema_id((*cst_iter)->get_table_id()),
             (*cst_iter)->get_constraint_id()))) {
       }
     } else {
       if (OB_FAIL(constraint_history_sql.append_fmt(
-          ", (%lu, %lu, %ld, %ld)",
+          ", (%" PRIu64 ", %" PRIu64 ", %" PRId64 ", %" PRId64 ")",
           ObSchemaUtils::get_extract_schema_id((*cst_iter)->get_table_id()),
           (*cst_iter)->get_constraint_id(), new_schema_version, is_deleted))) {
       } else if (OB_FAIL(constraint_sql.append_fmt(
-          ", (%lu, %lu)",
+          ", (%" PRIu64 ", %" PRIu64 ")",
           ObSchemaUtils::get_extract_schema_id((*cst_iter)->get_table_id()),
           (*cst_iter)->get_constraint_id()))) {
       }
@@ -1387,13 +1391,13 @@ int ObTableSqlService::delete_constraint(common::ObISQLClient &sql_client,
         if (constraint_column_sql.empty()) {
           if (OB_FAIL(constraint_column_history_sql.assign_fmt(
               "INSERT INTO %s(table_id, constraint_id, column_id, schema_version, is_deleted)"
-              " VALUES(%lu, %lu, %lu, %ld, %ld)",
+              " VALUES(%" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %" PRId64 ", %" PRId64 ")",
               OB_ALL_CONSTRAINT_COLUMN_HISTORY_TNAME,
               ObSchemaUtils::get_extract_schema_id((*cst_iter)->get_table_id()),
               (*cst_iter)->get_constraint_id(), *cst_col_iter, new_schema_version, is_deleted))) {
           } else if (OB_FAIL(constraint_column_sql.assign_fmt(
               "DELETE FROM %s WHERE (table_id, constraint_id, column_id)"
-              " IN ((%lu, %lu, %lu)",
+              " IN ((%" PRIu64 ", %" PRIu64 ", %" PRIu64 ")",
               OB_ALL_CONSTRAINT_COLUMN_TNAME,
               ObSchemaUtils::get_extract_schema_id((*cst_iter)->get_table_id()),
               (*cst_iter)->get_constraint_id(),
@@ -1401,11 +1405,11 @@ int ObTableSqlService::delete_constraint(common::ObISQLClient &sql_client,
           }
         } else {
           if (OB_FAIL(constraint_column_history_sql.append_fmt(
-              ", (%lu, %lu, %lu, %ld, %ld)",
+              ", (%" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %" PRId64 ", %" PRId64 ")",
               ObSchemaUtils::get_extract_schema_id((*cst_iter)->get_table_id()),
               (*cst_iter)->get_constraint_id(), *cst_col_iter, new_schema_version, is_deleted))) {
           } else if (OB_FAIL(constraint_column_sql.append_fmt(
-              ", (%lu, %lu, %lu)",
+              ", (%" PRIu64 ", %" PRIu64 ", %" PRIu64 ")",
               ObSchemaUtils::get_extract_schema_id((*cst_iter)->get_table_id()),
               (*cst_iter)->get_constraint_id(),
               *cst_col_iter))) {
@@ -1771,8 +1775,8 @@ int ObTableSqlService::check_table_history_matched_(
         ObSqlString sql;
         common::sqlclient::ObMySQLResult *result = NULL;
         if (OB_FAIL(sql.assign_fmt(
-            "SELECT %s FROM %s WHERE table_id = %lu AND schema_version = %ld"
-            " EXCEPT SELECT %s FROM %s WHERE table_id = %lu",
+            "SELECT %s FROM %s WHERE table_id = %" PRIu64 " AND schema_version = %" PRId64
+            " EXCEPT SELECT %s FROM %s WHERE table_id = %" PRIu64,
             column_sql.ptr(), OB_ALL_TABLE_HISTORY_TNAME, table_id, schema_version,
             column_sql.ptr(), OB_ALL_TABLE_TNAME, table_id))) {
         } else if (OB_FAIL(sql_client.read(res, sql.ptr()))) {
@@ -1924,7 +1928,7 @@ int ObTableSqlService::delete_single_constraint(
     const int64_t is_deleted = 1;
     if (OB_FAIL(sql.assign_fmt(
         "INSERT INTO %s (TABLE_ID, CONSTRAINT_ID, SCHEMA_VERSION, IS_DELETED) values "
-        "(%lu, %lu, %ld, %ld)",
+        "(%" PRIu64 ", %" PRIu64 ", %" PRId64 ", %" PRId64 ")",
         OB_ALL_CONSTRAINT_HISTORY_TNAME,
         ObSchemaUtils::get_extract_schema_id(orig_constraint.get_table_id()),
         orig_constraint.get_constraint_id(),
@@ -2876,7 +2880,7 @@ int ObTableSqlService::delete_from_all_column_history(ObISQLClient &sql_client,
         ret = OB_ERR_UNEXPECTED;
       }
     }
-    if (OB_SUCC(ret) && OB_FAIL(sql.append_fmt("%s(%lu, %lu, %ld, %ld)",
+    if (OB_SUCC(ret) && OB_FAIL(sql.append_fmt("%s(%" PRIu64 ", %" PRIu64 ", %" PRId64 ", %" PRId64 ")",
         (iter == table_schema.column_begin()) ? "" : ",",
         ObSchemaUtils::get_extract_schema_id(table_id),
         column_id,
@@ -3564,7 +3568,7 @@ int ObTableSqlService::batch_insert_ori_schema_version(
         if (OB_FAIL(insert_sql_string.append(", "))) {
         }
       }
-      if (FAILEDx(insert_sql_string.append_fmt("(%lu, %ld, now(6), now(6))",
+      if (FAILEDx(insert_sql_string.append_fmt("(%" PRIu64 ", %" PRId64 ", now(6), now(6))",
               ObSchemaUtils::get_extract_schema_id(table_id),
               ori_schema_version))) {
       } else {
@@ -3654,7 +3658,7 @@ int ObTableSqlService::delete_from_all_foreign_key(ObISQLClient &sql_client,
   // insert into __all_foreign_key_history
   if (OB_FAIL(sql.assign_fmt(
       "INSERT INTO %s(foreign_key_id,schema_version,is_deleted,child_table_id,parent_table_id)"
-      " VALUES(%lu,%ld,%ld,%lu,%lu)",
+      " VALUES(%" PRIu64 ",%" PRId64 ",%" PRId64 ",%" PRIu64 ",%" PRIu64 ")",
       OB_ALL_FOREIGN_KEY_HISTORY_TNAME,
       ObSchemaUtils::get_extract_schema_id(foreign_key_info.foreign_key_id_),
       new_schema_version, is_deleted,
@@ -3666,7 +3670,7 @@ int ObTableSqlService::delete_from_all_foreign_key(ObISQLClient &sql_client,
   }
   // delete from __all_foreign_key
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(sql.assign_fmt("DELETE FROM %s WHERE foreign_key_id = %lu",
+    if (OB_FAIL(sql.assign_fmt("DELETE FROM %s WHERE foreign_key_id = %" PRIu64 "",
                               OB_ALL_FOREIGN_KEY_TNAME,
                               ObSchemaUtils::get_extract_schema_id(foreign_key_info.foreign_key_id_)))) {
     } else if (OB_FAIL(sql_client.write(sql.ptr(), affected_rows))) {
@@ -3693,7 +3697,7 @@ int ObTableSqlService::delete_from_all_foreign_key_column(ObISQLClient &sql_clie
   // insert into __all_foreign_key_column_history
   if (OB_FAIL(sql.assign_fmt(
       "INSERT INTO %s(foreign_key_id,child_column_id,parent_column_id,schema_version,is_deleted,position)"
-      " VALUES(%lu,%lu,%lu,%ld,%ld,%lu)",
+      " VALUES(%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRId64 ",%" PRId64 ",%" PRIu64 ")",
       OB_ALL_FOREIGN_KEY_COLUMN_HISTORY_TNAME,
       ObSchemaUtils::get_extract_schema_id(foreign_key_id),
       child_column_id, parent_column_id, new_schema_version, is_deleted, fk_column_pos))) {
@@ -3703,7 +3707,7 @@ int ObTableSqlService::delete_from_all_foreign_key_column(ObISQLClient &sql_clie
   }
   if (OB_SUCC(ret)) {
     // delete from __all_foreign_key_column
-    if (OB_FAIL(sql.assign_fmt("DELETE FROM %s WHERE foreign_key_id = %lu AND child_column_id = %lu AND parent_column_id = %lu",
+    if (OB_FAIL(sql.assign_fmt("DELETE FROM %s WHERE foreign_key_id = %" PRIu64 " AND child_column_id = %" PRIu64 " AND parent_column_id = %" PRIu64 "",
                               OB_ALL_FOREIGN_KEY_COLUMN_TNAME,
                               ObSchemaUtils::get_extract_schema_id(foreign_key_id),
                               child_column_id, parent_column_id))) {
@@ -4603,10 +4607,10 @@ int ObTableSqlService::format_delete_mock_table_column_dml_sql(
     ObDMLSqlSplicer dml;
     if (OB_FAIL(dml.add_pk_column("mock_fk_parent_table_id", ObSchemaUtils::get_extract_schema_id(mock_fk_parent_table_schema.get_mock_fk_parent_table_id())))) {
     } else if (OB_FAIL(dml.splice_delete_sql(OB_ALL_MOCK_FK_PARENT_TABLE_COLUMN_TNAME, column_sql))) {
-    } else if (OB_FAIL(column_sql.append_fmt(" AND parent_column_id in (%lu", mock_fk_parent_table_schema.get_column_array().at(0).first))) {
+    } else if (OB_FAIL(column_sql.append_fmt(" AND parent_column_id in (%" PRIu64 "", mock_fk_parent_table_schema.get_column_array().at(0).first))) {
     } else {
       for (int64_t i = 1; OB_SUCC(ret) && i < mock_fk_parent_table_schema.get_column_array().count(); ++i) {
-        if (OB_FAIL(column_sql.append_fmt(", %lu", mock_fk_parent_table_schema.get_column_array().at(i).first))) {
+        if (OB_FAIL(column_sql.append_fmt(", %" PRIu64 "", mock_fk_parent_table_schema.get_column_array().at(i).first))) {
         }
       }
       if (FAILEDx(column_sql.append_fmt(")"))) {

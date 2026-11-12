@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX STORAGE
 
 #include "ob_meta_obj_struct.h"
+#include <inttypes.h>
 #include "storage/meta_mem/ob_storage_meta_mem_mgr.h"
 
 namespace oceanbase
@@ -88,29 +89,17 @@ int ObMetaDiskAddr::set_block_addr(
   return ret;
 }
 
-int ObMetaDiskAddr::get_file_addr(int64_t &file_id, int64_t &offset, int64_t &size) const
+int ObMetaDiskAddr::set_local_addr(int64_t tablet_id, int64_t size, uint64_t checksum)
 {
   int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(DiskType::FILE != type_)) {
-    ret = OB_NOT_SUPPORTED;
-  } else {
-    file_id = file_id_;
-    offset = offset_;
-    size = size_;
-  }
-  return ret;
-}
-
-int ObMetaDiskAddr::set_file_addr(const int64_t file_id, const int64_t offset, const int64_t size)
-{
-  int ret = OB_SUCCESS;
-  if (OB_UNLIKELY(file_id <= 0 || offset < 0 || offset > MAX_OFFSET || size < 0 || size > MAX_SIZE)) {
+  if (tablet_id <= 0 || size <= 0 || size > MAX_SIZE) {
     ret = OB_INVALID_ARGUMENT;
   } else {
-    file_id_ = file_id;
-    offset_ = offset;
+    reset();
+    first_id_ = checksum;
+    second_id_ = tablet_id;
     size_ = size;
-    type_ = DiskType::FILE;
+    type_ = LOCAL;
   }
   return ret;
 }
@@ -150,11 +139,8 @@ bool ObMetaDiskAddr::is_valid() const
 {
   bool ret = false;
   switch (type_) {
-    case DiskType::FILE:
-      ret = file_id_ > 0
-         && (offset_ < ObLogConstants::MAX_LOG_FILE_SIZE_IN_HISTORY)
-         && size_ > 0
-         && size_ <= ObLogConstants::MAX_LOG_FILE_SIZE_IN_HISTORY;
+    case DiskType::LOCAL:
+      ret = second_id_ > 0 && size_ > 0;
       break;
     case DiskType::BLOCK:
     case DiskType::RAW_BLOCK:
@@ -179,15 +165,17 @@ int64_t ObMetaDiskAddr::to_string(char *buf, const int64_t buf_len) const
   int64_t pos = 0;
   block_id().first_id_to_string(buf, buf_len, pos);
   switch (type_) {
-    case FILE:
+    case LOCAL:
       databuff_printf(buf, buf_len, pos,
-                      "[file_id=%ld,offset=%lu,size=%lu,type=%lu,seq=%lu]}",
-                      file_id_, offset_, size_, type_, seq_);
+                      "[tablet_id=%" PRId64 ",offset=%" PRIu64 ",size=%" PRIu64 ",type=%" PRIu64 ",seq=%" PRIu64 "]}",
+                      second_id_, static_cast<uint64_t>(offset_), static_cast<uint64_t>(size_),
+                      static_cast<uint64_t>(type_), seq_);
       break;
     default:
       databuff_printf(buf, buf_len, pos,
-                      "[2nd=%ld][3rd=%ld][offset=%lu,size=%lu,type=%lu,seq=%lu]}",
-                      second_id_, third_id_, offset_, size_, type_, seq_);
+                      "[2nd=%" PRId64 "][3rd=%" PRId64 "][offset=%" PRIu64 ",size=%" PRIu64 ",type=%" PRIu64 ",seq=%" PRIu64 "]}",
+                      second_id_, third_id_, static_cast<uint64_t>(offset_), static_cast<uint64_t>(size_),
+                      static_cast<uint64_t>(type_), seq_);
       break;
   }
 

@@ -15,7 +15,8 @@
  */
 
 #define USING_LOG_PREFIX SHARE_SCHEMA
-#include "config_bridge.h"
+#include "rust/config.h"
+#include <inttypes.h>
 #include "ob_multi_version_schema_service.h"
 #include "share/schema/ob_schema_getter_guard.h"
 #include "share/schema/ob_schema_publish_signal.h"
@@ -498,7 +499,6 @@ int ObMultiVersionSchemaService::get_schema(const ObSchemaMgr *mgr,
           precise_version = table_schema->get_schema_version();
           // add debug info
           if (ObSysTableChecker::is_sys_table_has_index(table_schema->get_table_id())) {
-            ObTaskController::get().allow_next_syslog();
             LOG_INFO("fetch sys table schema with index", KR(ret),
                      K(schema_status), K(schema_id),
                      K(schema_version), K(precise_version),
@@ -972,7 +972,6 @@ int ObMultiVersionSchemaService::retry_get_schema_guard(const int64_t schema_ver
       } else if (schema_version > save_schema_version) {
         // If the specified version is greater than orig_schema_version, the table can be determined to be deleted
         ret = OB_TABLE_IS_DELETED;
-        ObTaskController::get().allow_next_syslog();
         LOG_INFO("table is deleted",K(ret), K(table_id), K(schema_version), K(save_schema_version));
       } else {}
     }
@@ -1504,11 +1503,7 @@ int ObMultiVersionSchemaService::async_refresh_schema(const int64_t schema_versi
     // do nothing
   } else {
     int64_t retry_cnt = 0;
-#if defined(__APPLE__) || defined(_WIN32)
     const useconds_t RETRY_IDLE_TIME = 10 * 1000L; // 10ms
-#else
-    const __useconds_t RETRY_IDLE_TIME = 10 * 1000L; // 10ms
-#endif
     const int64_t MAX_RETRY_CNT = 100 * 1000 * 1000L / RETRY_IDLE_TIME; // 100s at most
     const int64_t SUBMIT_TASK_FREQUENCE = 2 * 1000 * 1000L / RETRY_IDLE_TIME; // each 2s
     while (OB_SUCC(ret)) {
@@ -2781,7 +2776,7 @@ int ObMultiVersionSchemaService::batch_fetch_tablet_to_table_history_(const ObIA
         int64_t idx = tablet_idxs.at(i);
         if (idx < 0 || idx >= tablet_ids.count()) {
           ret = OB_ERR_UNEXPECTED;
-        } else if (OB_FAIL(tablet_ids_sql.append_fmt("%s%lu",
+        } else if (OB_FAIL(tablet_ids_sql.append_fmt("%s%" PRIu64 "",
                    i == start_idx ? "" : ", ", tablet_ids.at(idx).id()))) {
         }
       } // end for
@@ -2789,7 +2784,7 @@ int ObMultiVersionSchemaService::batch_fetch_tablet_to_table_history_(const ObIA
       if (FAILEDx(sql.assign_fmt(
           "SELECT * FROM (SELECT *, row_number() "
           "OVER (PARTITION BY tablet_id ORDER BY schema_version DESC) AS row_num "
-          "FROM %s WHERE tablet_id in (%.*s) AND schema_version <= %ld) "
+          "FROM %s WHERE tablet_id in (%.*s) AND schema_version <= %" PRId64 ") "
           "WHERE row_num = 1",
           OB_ALL_TABLET_TO_TABLE_HISTORY_TNAME,
           tablet_ids_sql.string().length(),

@@ -15,7 +15,8 @@
  */
 
 #define USING_LOG_PREFIX SQL_ENG
-#include "config_bridge.h"
+#include "rust/config.h"
+#include <inttypes.h>
 #include "common/ob_timeout_ctx.h"
 #include "lib/stat/ob_diagnostic_info_guard.h"
 #include "share/ob_server_struct.h"
@@ -72,7 +73,7 @@ int ObCreateTableExecutor::prepare_stmt(ObCreateTableStmt &stmt,
   const int64_t timestamp = ObTimeUtility::current_time();
   obcall::ObCreateTableArg &create_table_arg = stmt.get_create_table_arg();
   create_table_name = create_table_arg.schema_.get_table_name_str();
-  if (OB_FAIL(databuff_printf(buf, buf_len, pos, "__ctas_%ld_%ld", session_id, timestamp))) {
+  if (OB_FAIL(databuff_printf(buf, buf_len, pos, "__ctas_%" PRId64 "_%" PRId64, session_id, timestamp))) {
   } else {
     ObString tmp_table_name(pos, buf);
     if (OB_FAIL(create_table_arg.schema_.set_table_name(tmp_table_name))) {
@@ -88,7 +89,7 @@ int ObCreateTableExecutor::ObInsSQLPrinter::inner_print(char *buf, int64_t buf_l
   const ObSelectStmt *select_stmt = NULL;
   int64_t pos1 = 0;
   uint64_t insert_mode = 0;
-  
+
   if (OB_ISNULL(stmt_) || OB_ISNULL(select_stmt= stmt_->get_sub_select())) {
     ret = OB_ERR_UNEXPECTED;
   } else {
@@ -107,7 +108,7 @@ int ObCreateTableExecutor::ObInsSQLPrinter::inner_print(char *buf, int64_t buf_l
       osg_str = do_osg_ ? "GATHER_OPTIMIZER_STATISTICS" : "NO_GATHER_OPTIMIZER_STATISTICS";
       if (stmt_->get_has_parallel_hint() &&
           OB_FAIL(databuff_printf(parallel_str, parallel_str_max_len, parallel_str_pos,
-                                  "PARALLEL(%lu)", stmt_->get_parallelism()))) {
+                                  "PARALLEL(%" PRId64 ")", stmt_->get_parallelism()))) {
       }
     }
     if (OB_FAIL(ret)) {
@@ -230,7 +231,7 @@ int ObCreateTableExecutor::prepare_alter_arg(ObCreateTableStmt &stmt,
   alter_table_arg.session_id_ = my_session->get_sessid_for_table();
   alter_table_schema->alter_type_ = OB_DDL_ALTER_TABLE;
   alter_table_arg.is_inner_ = my_session->is_inner();
-  
+
   if (OB_FAIL(alter_table_arg.tz_info_wrap_.deep_copy(my_session->get_tz_info_wrap()))) {
   } else if (OB_FAIL(alter_table_schema->assign(table_schema))) {
   } else if (!table_schema.is_mysql_tmp_table()
@@ -256,11 +257,11 @@ int ObCreateTableExecutor::prepare_drop_arg(const ObCreateTableStmt &stmt,
   const ObString &db_name = stmt.get_database_name();
   const ObString &tab_name = stmt.get_table_name();
   drop_table_arg.if_exist_ = true;
-  
+
   drop_table_arg.to_recyclebin_ = false;
   drop_table_arg.table_type_ = USER_TABLE;
   drop_table_arg.session_id_ = my_session->get_sessid_for_table();
-  
+
   int64_t foreign_key_checks = 0;
   my_session->get_foreign_key_checks(foreign_key_checks);
   drop_table_arg.foreign_key_checks_ = foreign_key_checks;
@@ -301,7 +302,7 @@ int ObCreateTableExecutor::execute_ctas(ObExecContext &ctx,
       if (OB_FAIL(ob_write_string(allocator, my_session->get_current_query_string(), cur_query))) {
       }
     }
-    
+
     if (OB_SUCC(ret)) {
       if (OB_FAIL(prepare_stmt(stmt, *my_session, create_table_name))) {
       } else if (OB_FAIL(prepare_ins_arg(stmt, my_session, ctx.get_sql_ctx()->schema_guard_, &plan_ctx->get_param_store(), ins_sql))) {
@@ -330,7 +331,7 @@ int ObCreateTableExecutor::execute_ctas(ObExecContext &ctx,
         if (OB_INVALID_VERSION == create_table_res.schema_version_) {
           ret = OB_ERR_UNEXPECTED;
         } else {
-          
+
           if (OB_FAIL(gctx.schema_service_->async_refresh_schema(create_table_res.schema_version_))) {
           }
         }
@@ -425,7 +426,7 @@ int ObCreateTableExecutor::execute_ctas(ObExecContext &ctx,
       } else {
       }
       char table_info_buffer[256];
-      snprintf(table_info_buffer, sizeof(table_info_buffer), "table_id:%ld, hidden_table_id:%ld",
+      snprintf(table_info_buffer, sizeof(table_info_buffer), "table_id:%" PRId64 ", hidden_table_id:%" PRId64,
                 alter_table_arg.table_id_, alter_table_arg.hidden_table_id_);
       SERVER_EVENT_ADD("ddl", "create table as select execute finish",
         "ret", ret,
@@ -450,7 +451,7 @@ int ObCreateTableExecutor::execute(ObExecContext &ctx, ObCreateTableStmt &stmt)
   ObSelectStmt *select_stmt = stmt.get_sub_select();
   const ObTableSchema &table_schema = create_table_arg.schema_;
   ObSQLSessionInfo *my_session = ctx.get_my_session();
-  
+
   if (OB_ISNULL(my_session)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(stmt.get_first_stmt(first_stmt))) {
@@ -587,7 +588,7 @@ int ObAlterTableExecutor::alter_table_rpc_v2(
   ObSArray<obcall::ObIndexArg *> add_index_arg_list;
   ObSArray<obcall::ObIndexArg *> drop_index_args;
   alter_table_arg.index_arg_list_.reset();
-  
+
   if (OB_ISNULL(my_session)) {
     ret = OB_INVALID_ARGUMENT;
   } else {
@@ -695,7 +696,7 @@ int ObAlterTableExecutor::alter_table_rpc_v2(
       // Rollback all established index
       if (OB_FAIL(ret)) {
         int tmp_ret = OB_SUCCESS;
-        
+
         for (int64_t i = 0; (OB_SUCCESS == tmp_ret) && (i < add_index_arg_list.size()); ++i) {
           if (failed_index_no == i) {
             // Synchronization index building logic has already deleted this failure
@@ -704,8 +705,8 @@ int ObAlterTableExecutor::alter_table_rpc_v2(
             obcall::ObDropIndexArg drop_index_arg;
             obcall::ObDropIndexRes drop_index_res;
             obcall::ObCreateIndexArg *create_index_arg = static_cast<obcall::ObCreateIndexArg *>(add_index_arg_list.at(i));
-            
-            
+
+
             drop_index_arg.index_table_id_ = res.res_arg_array_.at(i).schema_id_;
             drop_index_arg.session_id_ = create_index_arg->session_id_;
             drop_index_arg.index_name_ = create_index_arg->index_name_;
@@ -868,7 +869,7 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
       }
     }
     char table_info_buffer[256];
-    snprintf(table_info_buffer, sizeof(table_info_buffer), "table_id:%ld, hidden_table_id:%ld", 
+    snprintf(table_info_buffer, sizeof(table_info_buffer), "table_id:%" PRId64 ", hidden_table_id:%" PRId64,
               alter_table_arg.table_id_, alter_table_arg.hidden_table_id_);
 
     SERVER_EVENT_ADD("ddl", "alter table execute finish",
@@ -1269,7 +1270,7 @@ int ObAlterTableExecutor::check_alter_part_key(ObExecContext &ctx,
     AlterTableSchema &table_schema = const_cast<AlterTableSchema &>(arg.alter_table_schema_);
     share::schema::ObTableSchema::const_column_iterator it_begin = table_schema.column_begin();
     share::schema::ObTableSchema::const_column_iterator it_end = table_schema.column_end();
-    
+
     schema_guard.set_session_id(arg.session_id_);
     const ObString &origin_database_name = table_schema.get_origin_database_name();
     const ObString &origin_table_name = table_schema.get_origin_table_name();
@@ -1452,7 +1453,7 @@ int ObCommentExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
     ObSQLSessionInfo *my_session = nullptr;
     obcall::ObSetCommentArg set_comment_arg;
     obcall::ObParallelDDLRes set_comment_res;
-    
+
     alter_table_arg.ddl_stmt_str_ = first_stmt;
     alter_table_arg.is_parallel_ = true;
     my_session = ctx.get_my_session();
@@ -1532,7 +1533,7 @@ int ObDropTableExecutor::execute(ObExecContext &ctx, ObDropTableStmt &stmt)
   ObString first_stmt;
   ObSQLSessionInfo *my_session = NULL;
   int64_t foreign_key_checks = 0;
-  
+
   const ObTableType table_type = drop_table_arg.table_type_;
   if (OB_FAIL(stmt.get_first_stmt(first_stmt))) {
   } else {
@@ -1602,7 +1603,7 @@ int ObDropTableExecutor::execute(ObExecContext &ctx, ObDropTableStmt &stmt)
           SQL_ENG_LOG(INFO, "finish drop table execute.", KR(ret), "ddl_event_info", ObDDLEventInfo(GCTX.self_addr()));
         }
       }
-    }    
+    }
   }
 
   return ret;
@@ -1650,7 +1651,7 @@ int ObTruncateTableExecutor::check_use_parallel_truncate(const obcall::ObTruncat
   int ret = OB_SUCCESS;
   use_parallel_truncate = false;
   const ObTableSchema *table_schema = NULL;
-  
+
   const ObString table_name = arg.table_name_;
   const ObString database_name = arg.database_name_;
   share::schema::ObSchemaGetterGuard schema_guard;
@@ -1700,7 +1701,7 @@ int ObTruncateTableExecutor::execute(ObExecContext &ctx, ObTruncateTableStmt &st
       tmp_arg.foreign_key_checks_ = foreign_key_checks;
       int64_t affected_rows = 0;
       bool use_parallel_truncate = false;
-      
+
       if (OB_FAIL(check_use_parallel_truncate(truncate_table_arg, use_parallel_truncate))) {
       } else if (!use_parallel_truncate) {
         if (OB_FAIL(query::serialize_root_service_call(
@@ -1891,7 +1892,7 @@ int ObAlterTableExecutor::populate_based_schema_obj_info_(obcall::ObAlterTableAr
   int ret = OB_SUCCESS;
   const uint64_t table_id = alter_table_arg.alter_table_schema_.get_table_id();
   if (OB_INVALID_ID != table_id) {
-    
+
     SMART_VAR(ObSchemaGetterGuard, guard) {
     const ObTableSchema *orig_table = nullptr;
     if (OB_FAIL(ObMultiVersionSchemaService::get_instance().get_runtime_schema_guard(

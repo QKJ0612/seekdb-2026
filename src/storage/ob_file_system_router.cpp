@@ -18,6 +18,7 @@
 #include "ob_file_system_router.h"
 #include "share/ob_io_device_helper.h"
 #include "lib/file/file_directory_utils.h"
+#include "lib/utility/ob_platform_io.h"
 #include "lib/string/ob_sql_string.h"
 
 namespace oceanbase {
@@ -37,17 +38,12 @@ ObFileSystemRouter & ObFileSystemRouter::get_instance()
 ObFileSystemRouter::ObFileSystemRouter()
 {
   data_dir_[0] = '\0';
-  slog_dir_[0] = '\0';
   clog_dir_[0] = '\0';
   sstable_dir_[0] = '\0';
 
   clog_file_spec_.retry_write_policy_ = "normal";
   clog_file_spec_.log_create_policy_ = "normal";
   clog_file_spec_.log_write_policy_ = "truncate";
-
-  slog_file_spec_.retry_write_policy_ = "normal";
-  slog_file_spec_.log_create_policy_ = "normal";
-  slog_file_spec_.log_write_policy_ = "truncate";
 
   svr_seq_ = 0;
   is_inited_ = false;
@@ -56,17 +52,12 @@ ObFileSystemRouter::ObFileSystemRouter()
 void ObFileSystemRouter::reset()
 {
   data_dir_[0] = '\0';
-  slog_dir_[0] = '\0';
   clog_dir_[0] = '\0';
   sstable_dir_[0] = '\0';
 
   clog_file_spec_.retry_write_policy_ = "normal";
   clog_file_spec_.log_create_policy_ = "normal";
   clog_file_spec_.log_write_policy_ = "truncate";
-
-  slog_file_spec_.retry_write_policy_ = "normal";
-  slog_file_spec_.log_create_policy_ = "normal";
-  slog_file_spec_.log_write_policy_ = "truncate";
 
   svr_seq_ = 0;
   is_inited_ = false;
@@ -85,10 +76,6 @@ int ObFileSystemRouter::init(const char *data_dir, const char *redo_dir)
     clog_file_spec_.retry_write_policy_ = "normal";
     clog_file_spec_.log_create_policy_ = "normal";
     clog_file_spec_.log_write_policy_ = "truncate";
-
-    slog_file_spec_.retry_write_policy_ = "normal";
-    slog_file_spec_.log_create_policy_ = "normal";
-    slog_file_spec_.log_write_policy_ = "truncate";
 
     is_inited_ = true;
   }
@@ -120,7 +107,7 @@ int ObFileSystemRouter::init_local_dirs(const char* data_dir, const char* redo_d
   int pret = 0;
 
   char work_directory[MAX_PATH_SIZE] = {0};
-  if (nullptr == getcwd(work_directory, MAX_PATH_SIZE)) {
+  if (0 != ob_getcwd_utf8(work_directory, MAX_PATH_SIZE)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("get work directory failed", K(ret), KCSTRING(strerror(errno)));
   }
@@ -139,17 +126,6 @@ int ObFileSystemRouter::init_local_dirs(const char* data_dir, const char* redo_d
         ret = OB_BUF_NOT_ENOUGH;
         LOG_ERROR("construct data dir fail", K(ret), K(tmp_dir));
       }
-    }
-  }
-
-  if (OB_SUCC(ret)) {
-    pret = snprintf(slog_dir_, MAX_PATH_SIZE, "%s/slog", data_dir_);
-    if (pret < 0 || pret >= MAX_PATH_SIZE) {
-      ret = OB_BUF_NOT_ENOUGH;
-      LOG_ERROR("construct slog path fail", K(ret));
-    }
-    if (OB_FAIL(ret)) {
-    } else if (OB_FAIL(FileDirectoryUtils::create_full_path(slog_dir_))) {
     }
   }
 
@@ -185,7 +161,7 @@ int ObFileSystemRouter::init_local_dirs(const char* data_dir, const char* redo_d
 
   if (OB_SUCC(ret)) {
     LOG_INFO("succeed to construct local dir",
-      KCSTRING(data_dir_), KCSTRING(slog_dir_), KCSTRING(clog_dir_), KCSTRING(sstable_dir_));
+      KCSTRING(data_dir_), KCSTRING(clog_dir_), KCSTRING(sstable_dir_));
   }
 
   return ret;

@@ -18,6 +18,7 @@
 #define PRINT_TS(x) (ObPrintTableStore(x))
 
 #include "ob_tablet_table_store.h"
+#include <inttypes.h>
 #include "share/rc/ob_server_runtime.h"
 #include "storage/ddl/ob_tablet_ddl_kv.h"
 #include "storage/concurrency_control/ob_multi_version_garbage_collector.h"
@@ -2056,11 +2057,11 @@ int64_t ObPrintTableStore::to_string(char *buf, const int64_t buf_len) const
     J_OBJ_START();
     if (!major_tables_.empty() || !minor_tables_.empty() || !memtables_.empty() || !ddl_mem_sstables_.empty()
         || !ddl_sstables_.empty() || !meta_major_tables_.empty() || !mds_sstables_.empty()) {
-      ObCurTraceId::TraceId *trace_id = ObCurTraceId::get_trace_id();
+      const ObCurTraceId::TraceId *trace_id = ObCurTraceId::get_trace_id();
       J_NEWLINE();
       // table_type|max_merge_version
       //      |upper_trans_version|start_scn|end_scn|ref|buffer_minor
-      BUF_PRINTF("[%ld][%s] [", GETTID(), GETTNAME());
+      BUF_PRINTF("[%" PRId64 "][%s] [", GETTID(), GETTNAME());
       BUF_PRINTO(PC(trace_id));
       BUF_PRINTF("] ");
       BUF_PRINTF(" %-18s %-22s %-16s %-16s %-19s %-19s %-19s %-19s %-4s %-16s \n",
@@ -2156,8 +2157,8 @@ void ObPrintTableStore::table_to_string(
      int64_t &pos) const
 {
   if (nullptr != table) {
-    ObCurTraceId::TraceId *trace_id = ObCurTraceId::get_trace_id();
-    BUF_PRINTF("[%ld][%s] [", GETTID(), GETTNAME());
+    const ObCurTraceId::TraceId *trace_id = ObCurTraceId::get_trace_id();
+    BUF_PRINTF("[%" PRId64 "][%s] [", GETTID(), GETTNAME());
     BUF_PRINTO(PC(trace_id));
     BUF_PRINTF("] ");
     const char* table_name = table->is_sstable()
@@ -2167,7 +2168,7 @@ void ObPrintTableStore::table_to_string(
       ? (static_cast<ObSSTable *>(table)->contain_uncommitted_row() ? "true" : "false")
       : "unused";
 
-    BUF_PRINTF(" %-18s %-22s %-16u %-16u %-19lu %-19lu %-19lu %-19lu %-4ld %-16s ",
+    BUF_PRINTF(" %-18s %-22s %-16u %-16u %-19" PRIu64 " %-19" PRIu64 " %-19" PRIu64 " %-19" PRIu64 " %-4" PRId64 " %-16s ",
       table_arr,
       table_name,
       table->get_key().slice_range_.start_slice_idx_,
@@ -2189,14 +2190,14 @@ void ObPrintTableStore::ddl_kv_to_string(
      int64_t &pos) const
 {
   if (nullptr != table) {
-    ObCurTraceId::TraceId *trace_id = ObCurTraceId::get_trace_id();
-    BUF_PRINTF("[%ld][%s] [", GETTID(), GETTNAME());
+    const ObCurTraceId::TraceId *trace_id = ObCurTraceId::get_trace_id();
+    BUF_PRINTF("[%" PRId64 "][%s] [", GETTID(), GETTNAME());
     BUF_PRINTO(PC(trace_id));
     BUF_PRINTF("] ");
     const char *table_name = ObITable::get_table_type_name(ObITable::DDL_MEM_SSTABLE);
     const char *uncommit_row = "false";
 
-    BUF_PRINTF(" %-18s %-22s %-16u %-16u %-19lu %-19lu %-19lu %-19lu %-4ld %-16s ",
+    BUF_PRINTF(" %-18s %-22s %-16u %-16u %-19" PRIu64 " %-19" PRIu64 " %-19" PRIu64 " %-19" PRIu64 " %-4" PRId64 " %-16s ",
       table_arr,
       table_name,
       table->get_key().slice_range_.start_slice_idx_,

@@ -17,6 +17,7 @@
 #ifndef OCEANBASE_COMMON_OB_OBJ_FUNCS_
 #define OCEANBASE_COMMON_OB_OBJ_FUNCS_
 
+#include <inttypes.h>
 #include "common/timezone/ob_timezone_info.h"
 #include "common/timezone/ob_time_convert.h"
 #include "common/json_type/ob_json_parse.h"
@@ -616,7 +617,7 @@ DEF_NUMERIC_FUNCS(ObMediumIntType, mediumint, int32_t, "%d", "'%d'", int64_t);
 // ObInt32Type=4,                 // int32
 DEF_NUMERIC_FUNCS(ObInt32Type, int32, int32_t, "%d", "'%d'", int64_t);
 // ObIntType=5,                    // int64, aka bigint
-DEF_NUMERIC_FUNCS(ObIntType, int, int64_t, "%ld", "'%ld'", int64_t);
+DEF_NUMERIC_FUNCS(ObIntType, int, int64_t, "%" PRId64, "'%" PRId64 "'", int64_t);
 // ObUTinyIntType=6,                // uint8
 DEF_NUMERIC_FUNCS(ObUTinyIntType, utinyint, uint8_t, "%hhu", "'%hhu'", uint64_t);
 // ObUSmallIntType=7,               // uint16
@@ -626,7 +627,7 @@ DEF_NUMERIC_FUNCS(ObUMediumIntType, umediumint, uint32_t, "%u", "'%u'", uint64_t
 // ObUInt32Type=9,                    // uint32
 DEF_NUMERIC_FUNCS(ObUInt32Type, uint32, uint32_t, "%u", "'%u'", uint64_t);
 // ObUInt64Type=10,                 // uint64
-DEF_NUMERIC_FUNCS(ObUInt64Type, uint64, uint64_t, "%lu", "'%lu'", uint64_t);
+DEF_NUMERIC_FUNCS(ObUInt64Type, uint64, uint64_t, "%" PRIu64, "'%" PRIu64 "'", uint64_t);
 // ObFloatType=11,                  // single-precision floating point
 DEF_FLOAT_FUNCS(ObFloatType, float, float, double);
 // ObDoubleType=12,                 // double-precision floating point
@@ -669,7 +670,7 @@ DEF_DOUBLE_FUNCS(ObUDoubleType, udouble, double, double);
                                             int64_t &pos, const ObObjPrintParams &params)   \
   {                                                                                         \
     if (params.binary_string_print_hex_) {                                                  \
-      return databuff_printf(buffer, length, pos, "%lX", obj.get_bit());                    \
+      return databuff_printf(buffer, length, pos, "%" PRIX64, obj.get_bit());                    \
     } else if (params.binary_string_print_base64_) {                                        \
       const uint64_t v = obj.get_bit();                                                     \
       int8_t scale = obj.get_meta().get_scale();                                            \
@@ -682,7 +683,7 @@ DEF_DOUBLE_FUNCS(ObUDoubleType, udouble, double, double);
       const uint8_t bit_bytes = (scale + 8 - 1) / 8;                                         \
       return ObBase64Encoder::encode(reinterpret_cast<const uint8_t*>(&v), bit_bytes, buffer, length, pos); \
     } else {                                                                                 \
-      return databuff_printf(buffer, length, pos, "%lu", obj.get_bit());                     \
+      return databuff_printf(buffer, length, pos, "%" PRIu64, obj.get_bit());                     \
     }                                                                                        \
   }                                                                                          \
   template <>                                                           \
@@ -710,8 +711,8 @@ DEF_BIT_FUNCS(ObBitType, bit, uint64_t);
 //ObEnumType=32
 //ObSetType=33
 //TODO(yts):print function is not accurate
-DEF_NUMERIC_FUNCS(ObEnumType, enum, uint64_t, "%lu", "'%lu'", uint64_t);
-DEF_NUMERIC_FUNCS(ObSetType, set, uint64_t, "%lu", "'%lu'", uint64_t);
+DEF_NUMERIC_FUNCS(ObEnumType, enum, uint64_t, "%" PRIu64, "'%" PRIu64 "'", uint64_t);
+DEF_NUMERIC_FUNCS(ObSetType, set, uint64_t, "%" PRIu64, "'%" PRIu64 "'", uint64_t);
 
 
 ////////////////
@@ -1242,7 +1243,7 @@ inline int obj_print_plain_str<ObHexStringType>(const ObObj &obj, char *buffer,
       if (OB_SUCC(ret) && params.refine_range_max_value_) {                                 \
         int64_t tails = 0;                                                                  \
         while (pos > 0 && (char)(0xff) == buffer[pos-1]) { pos--; tails++; }                \
-        if (tails > 0) { ret = databuff_printf(buffer, length, pos, "<FF><repeat %ld times>", tails); } \
+        if (tails > 0) { ret = databuff_printf(buffer, length, pos, "<FF><repeat %" PRId64 " times>", tails); } \
       }                                                                                     \
     } else {                                                                                \
       uint32_t result_len = 0;                                                              \
@@ -1370,7 +1371,7 @@ DEF_VARCHAR_FUNCS(ObCharType, char, ObString);
       ObEnumSetInnerValue inner_value;                                  \
       if (OB_FAIL(obj.get_enumset_inner_value(inner_value))) {         \
       } else {                                                          \
-        ret = databuff_printf(buffer, length, pos, "%.*s; %ld", inner_value.string_value_.length(),\
+        ret = databuff_printf(buffer, length, pos, "%.*s; %" PRId64 "", inner_value.string_value_.length(),\
                               inner_value.string_value_.ptr(), inner_value.numberic_value_);  \
       }                                                                 \
     }                                                                     \
@@ -1402,7 +1403,7 @@ DEF_VARCHAR_FUNCS(ObCharType, char, ObString);
       ObEnumSetInnerValue inner_value;                                  \
       if (OB_FAIL(obj.get_enumset_inner_value(inner_value))) {         \
       } else {                                                          \
-        ret = databuff_printf(buf, buf_len, pos, "%.*s; %ld", inner_value.string_value_.length(),\
+        ret = databuff_printf(buf, buf_len, pos, "%.*s; %" PRId64 "", inner_value.string_value_.length(),\
                               inner_value.string_value_.ptr(), inner_value.numberic_value_);  \
       }                                                                 \
     }                                                                   \
@@ -1738,7 +1739,7 @@ inline int obj_print_sql<ObJsonType>(const ObObj &obj, char *buffer, int64_t len
   uint32_t parse_flag = 0;
   if (OB_FAIL(obj.get_json_print_data(str, buffer, length, pos))) {
   } else if (str.empty()) { // nothing to print;
-  } else if (OB_FAIL(ObJsonBaseFactory::get_json_base(&tmp_allocator, str, in_type, in_type, j_base, parse_flag))) {
+  } else if (OB_FAIL(ObJsonBaseFactory::get_json_base(&tmp_allocator, str, in_type, j_base, parse_flag))) {
   } else if (OB_FAIL(j_base->print(jbuf, false, str.length()))) {
   } else if (OB_FAIL(databuff_printf(buffer, length, pos, "'"))) {
   } else if (OB_FAIL(databuff_printf(buffer, length, pos, "%.*s", 
@@ -1769,7 +1770,7 @@ inline int obj_print_plain_str<ObJsonType>(const ObObj &obj, char *buffer, int64
   uint32_t parse_flag = 0;
   if (OB_FAIL(obj.get_json_print_data(str, buffer, length, pos))) {
   } else if (str.empty()) { // nothing to print;
-  } else if (OB_FAIL(ObJsonBaseFactory::get_json_base(&tmp_allocator, str, in_type, in_type, j_base, parse_flag))) {
+  } else if (OB_FAIL(ObJsonBaseFactory::get_json_base(&tmp_allocator, str, in_type, j_base, parse_flag))) {
   } else if (OB_FAIL(j_base->print(jbuf, false, str.length()))) {
   } else if (params.use_memcpy_) {
     ret = databuff_memcpy(buffer, length, pos, jbuf.length(), jbuf.ptr());
@@ -1794,7 +1795,7 @@ inline int obj_print_json<ObJsonType>(const ObObj &obj, char *buf, int64_t buf_l
   uint32_t parse_flag = 0;
   if (OB_FAIL(obj.get_json_print_data(str, buf, buf_len, pos))) {
   } else if (str.empty()) { // nothing to print;
-  } else if (OB_FAIL(ObJsonBaseFactory::get_json_base(&tmp_allocator, str, in_type, in_type, j_base, parse_flag))) {
+  } else if (OB_FAIL(ObJsonBaseFactory::get_json_base(&tmp_allocator, str, in_type, j_base, parse_flag))) {
   } else if (OB_FAIL(j_base->print(jbuf, false, str.length()))) {
   } else if (OB_FAIL(databuff_printf(buf, buf_len, pos, "%.*s",
                                      static_cast<int>(MIN(jbuf.length(), buf_len - pos)),
@@ -1921,7 +1922,7 @@ template <>
       ret = databuff_printf(buffer, length, pos, "'%s'", N_UPPERCASE_CUR_TIMESTAMP);
       break;
     default:
-      _OB_LOG(WARN, "ext %ld should not be print as sql varchar literal", obj.get_ext());
+      _OB_LOG(WARN, "ext %" PRId64 " should not be print as sql varchar literal", obj.get_ext());
       ret = OB_INVALID_ARGUMENT;
       break;
   }
@@ -1948,7 +1949,7 @@ template <>
       ret = databuff_printf(buffer, length, pos, "%s", N_UPPERCASE_CUR_TIMESTAMP);
       break;
     default:
-      _OB_LOG(WARN, "ext %ld should not be print as sql", obj.get_ext());
+      _OB_LOG(WARN, "ext %" PRId64 " should not be print as sql", obj.get_ext());
       ret = OB_INVALID_ARGUMENT;
       break;
   }
@@ -2088,7 +2089,7 @@ template <>
 {
   UNUSED(obj);
   UNUSED(params);
-  return databuff_printf(buffer, length, pos, ":%ld", obj.get_unknown());
+  return databuff_printf(buffer, length, pos, ":%" PRId64, obj.get_unknown());
 }
 template <>
     inline int obj_print_str<ObUnknownType>(const ObObj &obj, char *buffer, int64_t length,

@@ -18,6 +18,7 @@
 #define STORAGE_MULTI_DATA_SOURCE_MDS_NODE_IPP
 
 #include "lib/ob_abort.h"
+#include <inttypes.h>
 #include "lib/ob_errno.h"
 #include "lib/utility/ob_macro_utils.h"
 #include "storage/multi_data_source/runtime_utility/list_helper.h"
@@ -94,17 +95,17 @@ int64_t UserMdsNode<K, V>::to_string(char * buf, const int64_t buf_len) const
   if (p_mds_row_ && p_mds_row_->p_mds_unit_) {
     p_mds_table = p_mds_row_->p_mds_unit_->p_mds_table_;
   }
-#ifdef _WIN32
+#if defined(_WIN32) || (defined(__EMSCRIPTEN__) && __SIZEOF_LONG__ == 4)
   databuff_printf(buf, buf_len, pos, "this:0x%llx, ", (unsigned long long)(uintptr_t)this);
 #else
-  databuff_printf(buf, buf_len, pos, "this:0x%lx, ", (unsigned long)this);
+  databuff_printf(buf, buf_len, pos, "this:0x%" PRIx64 ", ", (unsigned long)this);
 #endif
   if (nullptr != p_mds_table) {
     databuff_print_multi_objs(buf, buf_len, pos, "tablet_id:", p_mds_table->tablet_id_, ", ");
   } else {
     databuff_printf(buf, buf_len, pos, "tablet_id:%s, ", "NULL");
   }
-  databuff_printf(buf, buf_len, pos, "writer:%ld, ", writer_id_);
+  databuff_printf(buf, buf_len, pos, "writer:%" PRId64 ", ", writer_id_);
   databuff_print_multi_objs(buf, buf_len, pos, "seq_no:", seq_no_, ", ");
   char scn_buf[64] = {'\0'};
   databuff_printf(buf, buf_len, pos, "redo_scn:%s, ",
@@ -114,18 +115,18 @@ int64_t UserMdsNode<K, V>::to_string(char * buf, const int64_t buf_len) const
   databuff_printf(buf, buf_len, pos, "trans_version:%s, ",
       obj_to_string(trans_version_, scn_buf, sizeof(scn_buf)));
   databuff_print_multi_objs(buf, buf_len, pos, "status:", status_, ", ");
-#ifdef _WIN32
+#if defined(_WIN32) || (defined(__EMSCRIPTEN__) && __SIZEOF_LONG__ == 4)
   databuff_printf(buf, buf_len, pos, "ver_next:0x%llx, ",
   (unsigned long long)(uintptr_t)(static_cast<UserMdsNode*>(static_cast<ListNode<UserMdsNode<K, V>>*>(ListNode<UserMdsNode<K, V>>::next_))));
   databuff_printf(buf, buf_len, pos, "linked:0x%llx, ",
   (unsigned long long)(uintptr_t)(static_cast<UserMdsNode*>(static_cast<ListNode<MdsNode>*>(ListNode<MdsNode>::next_))));
   databuff_printf(buf, buf_len, pos, "mds_ctx:0x%llx, ", (unsigned long long)(uintptr_t)(mds_ctx_));
 #else
-  databuff_printf(buf, buf_len, pos, "ver_next:0x%lx, ",
+  databuff_printf(buf, buf_len, pos, "ver_next:0x%" PRIx64 ", ",
   (unsigned long)(static_cast<UserMdsNode*>(static_cast<ListNode<UserMdsNode<K, V>>*>(ListNode<UserMdsNode<K, V>>::next_))));
-  databuff_printf(buf, buf_len, pos, "linked:0x%lx, ",
+  databuff_printf(buf, buf_len, pos, "linked:0x%" PRIx64 ", ",
   (unsigned long)(static_cast<UserMdsNode*>(static_cast<ListNode<MdsNode>*>(ListNode<MdsNode>::next_))));
-  databuff_printf(buf, buf_len, pos, "mds_ctx:0x%lx, ", (unsigned long)(mds_ctx_));
+  databuff_printf(buf, buf_len, pos, "mds_ctx:0x%" PRIx64 ", ", (unsigned long)(mds_ctx_));
 #endif
   databuff_print_multi_objs(buf, buf_len, pos, "user_data:", user_data_);
   return pos;

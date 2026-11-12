@@ -14,7 +14,8 @@
  * limitations under the License.
  */
 
-#include "config_bridge.h"
+#include "rust/config.h"
+#include <inttypes.h>
 #include "ob_mvcc_row.h"
 #include "share/rc/ob_server_runtime.h"
 #include "storage/memtable/ob_row_compactor.h"
@@ -181,11 +182,11 @@ int64_t ObMvccTransNode::to_string(char *buf, const int64_t buf_len) const
                           "next=%p "
                           "modify_count=%u "
                           "acc_checksum=%u "
-                          "version=%ld "
+                          "version=%" PRId64 " "
                           "type=%d "
                           "flag=%d "
-                          "snapshot_barrier=%ld "
-                          "snapshot_barrier_flag=%ld ",
+                          "snapshot_barrier=%" PRId64 " "
+                          "snapshot_barrier_flag=%" PRId64 " ",
                           prev_,
                           next_,
                           modify_count_,
@@ -281,11 +282,9 @@ int ObMvccRowFilter::read_row_and_check(
     } else if (OB_FAIL(mds_filter_.truncate_part_filter_->check_filter_row_complete(datum_row_, complete))) {
     }
     if (OB_FAIL(ret) || !complete) {
-      ObTaskController::get().allow_next_syslog();
        // DEBUG log, remove later
     } else if (OB_FAIL(mds_filter_.truncate_part_filter_->filter(datum_row_, filtered, true/*check_filter*/, true/*check_version*/))) {
     } else {
-      ObTaskController::get().allow_next_syslog();
       TRANS_LOG(INFO, "success to check trans node filtered", KR(ret), K_(datum_row), K(filtered)); // DEBUG log, remove later
     }
   }
@@ -390,14 +389,14 @@ int64_t ObMvccRow::to_string(char *buf, const int64_t buf_len) const
                           list_head_,
                           latest_compact_node_);
   common::databuff_printf(buf, buf_len, pos, max_trans_version_);
-  common::databuff_printf(buf, buf_len, pos, " max_trans_id=%ld max_elr_trans_version=", 
+  common::databuff_printf(buf, buf_len, pos, " max_trans_id=%" PRId64 " max_elr_trans_version=",
                           max_trans_id_.get_id());
   common::databuff_printf(buf, buf_len, pos, max_elr_trans_version_);
   common::databuff_printf(buf, buf_len, pos,
-                          " max_elr_trans_id=%ld "
-                          "latest_compact_ts=%ld "
-                          "last_compact_cnt=%ld "
-                          "total_trans_node_cnt=%ld max_modify_scn=",
+                          " max_elr_trans_id=%" PRId64 " "
+                          "latest_compact_ts=%" PRId64 " "
+                          "last_compact_cnt=%" PRId64 " "
+                          "total_trans_node_cnt=%" PRId64 " max_modify_scn=",
                           max_elr_trans_id_.get_id(),
                           latest_compact_ts_,
                           last_compact_cnt_,

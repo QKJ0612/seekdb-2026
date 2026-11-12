@@ -18,6 +18,7 @@
 #define OCEANBASE_SRC_SQL_PARSER_SQL_PARSER_BASE_H_
 
 #include <stdint.h>
+#include <inttypes.h>
 #include <assert.h>
 #include <time.h>
 #include <stdlib.h>
@@ -366,7 +367,7 @@ do {                                                                            
         result->no_param_sql_len_ += start - result->pl_parse_info_.last_pl_symbol_pos_ - 1; \
         result->pl_parse_info_.last_pl_symbol_pos_ = end; \
         result->no_param_sql_[result->no_param_sql_len_++]  = ':'; \
-        result->no_param_sql_len_ += sprintf(result->no_param_sql_ + result->no_param_sql_len_, "%ld", idx); \
+        result->no_param_sql_len_ += sprintf(result->no_param_sql_ + result->no_param_sql_len_, "%" PRId64, (int64_t)(idx)); \
       } \
     } while (0)
 
@@ -416,7 +417,7 @@ do {                                                                            
       } else if (is_add_alas_name) { \
         int64_t idx = INVALID_INDEX; \
         int lookup_pl_symbol_ret = OB_PARSER_SUCCESS; \
-        if (NULL != node->children_[0] && T_COLUMN_REF == node->children_[0]->type_ && OB_UNLIKELY(0 != (lookup_pl_symbol_ret = lookup_pl_symbol(result->pl_parse_info_.pl_ns_, node->str_value_, node->str_len_, &idx)))) { \
+        if (NULL != node->children_[0] && T_COLUMN_REF == node->children_[0]->type_ && OB_UNLIKELY(0 != (lookup_pl_symbol_ret = result->pl_parse_info_.lookup_symbol_(result->pl_parse_info_.pl_ns_, node->str_value_, node->str_len_, &idx)))) { \
           yyerror(NULL, result, "failed to lookup pl symbol\n");    \
           YYABORT_WITH_ERROR(lookup_pl_symbol_ret); \
         } else if (NULL != node->children_[0] && T_COLUMN_REF == node->children_[0]->type_ && INVALID_INDEX == idx) { \
@@ -436,14 +437,14 @@ do {                                                                            
       else { \
         int64_t idx = INVALID_INDEX; \
         int lookup_pl_symbol_ret = OB_PARSER_SUCCESS; \
-        if (OB_UNLIKELY(0 != (lookup_pl_symbol_ret = lookup_pl_symbol(result->pl_parse_info_.pl_ns_, node->str_value_, node->str_len_, &idx)))) { \
+        if (OB_UNLIKELY(0 != (lookup_pl_symbol_ret = result->pl_parse_info_.lookup_symbol_(result->pl_parse_info_.pl_ns_, node->str_value_, node->str_len_, &idx)))) { \
           yyerror(NULL, result, "failed to lookup pl symbol\n");    \
           YYABORT_WITH_ERROR(lookup_pl_symbol_ret); \
         } else if (INVALID_INDEX != idx) { \
           copy_and_skip_symbol(result, start, end); \
           check_need_malloc(result, 21); \
           result->no_param_sql_[result->no_param_sql_len_++]  = ':'; \
-          result->no_param_sql_len_ += sprintf(result->no_param_sql_ + result->no_param_sql_len_, "%ld", idx); \
+          result->no_param_sql_len_ += sprintf(result->no_param_sql_ + result->no_param_sql_len_, "%" PRId64, (int64_t)(idx)); \
           store_pl_symbol(node, result->param_nodes_, result->tail_param_node_); \
         } else if (is_report_error) { \
           YYABORT_UNDECLARE_VAR;   \

@@ -37,6 +37,7 @@ const char *VALID_PROVIDERS[] = {
   "SILICONFLOW",
   "COHERE",
   "HUNYUAN-OPENAI",
+  "OLLAMA",
   "OPENAI"
 };
 
@@ -69,7 +70,7 @@ int ObAiModelEndpointInfo::parse_from_json_base(common::ObArenaAllocator &alloca
   name_ = name;
   if (OB_FAIL(merge_delta_endpoint(allocator, params_jbase))) {
   }
-  LOG_INFO("parse from json base", K(ret), K(params_jbase), K(params_jbase.json_type()), K(params_jbase.element_count()));
+  LOG_INFO("parse from json base", K(ret), K(params_jbase.json_type()), K(params_jbase.element_count()));
   return ret;
 }
 
@@ -112,7 +113,11 @@ int ObAiModelEndpointInfo::check_valid() const
   } else if (url_.empty()) {
     ret = OB_AI_FUNC_PARAM_EMPTY;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_EMPTY, strlen("url"), "url");
-  } else if (access_key_.empty()) {
+  } else if (!url_.prefix_match_ci("http://") && !url_.prefix_match_ci("https://")) {
+    ret = OB_AI_FUNC_PARAM_VALUE_INVALID;
+    LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, strlen("url"), "url");
+  } else if (access_key_.empty() && provider_.case_compare("ollama") != 0) {
+    // Ollama runs locally and does not require an access key.
     ret = OB_AI_FUNC_PARAM_EMPTY;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_EMPTY, strlen("access_key"), "access_key");
     LOG_WARN("access_key is empty", K(ret), K(*this));
@@ -177,14 +182,16 @@ int ObAiModelEndpointInfo::merge_delta_endpoint(common::ObArenaAllocator &alloca
     }
   }
 
-  LOG_INFO("merge delta endpoint", K(ret), K(delta_jbase), K(delta_jbase.json_type()), K(delta_jbase.element_count()));
+  LOG_INFO("merge delta endpoint", K(ret), K(delta_jbase.json_type()), K(delta_jbase.element_count()));
   return ret;
 }
 
 int ObAiModelEndpointInfo::encrypt_access_key_(ObIAllocator &allocator, const ObString &access_key, ObString &encrypted_access_key)
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(ob_write_string(allocator, access_key, encrypted_access_key))) {
+  if (access_key.empty()) {
+    encrypted_access_key.reset();
+  } else if (OB_FAIL(ob_write_string(allocator, access_key, encrypted_access_key))) {
   }
   return ret;
 }
@@ -192,7 +199,9 @@ int ObAiModelEndpointInfo::encrypt_access_key_(ObIAllocator &allocator, const Ob
 int ObAiModelEndpointInfo::decrypt_access_key_(ObIAllocator &allocator, const ObString &encrypted_access_key, ObString &unencrypted_access_key) const
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(ob_write_string(allocator, encrypted_access_key, unencrypted_access_key))) {
+  if (encrypted_access_key.empty()) {
+    unencrypted_access_key.reset();
+  } else if (OB_FAIL(ob_write_string(allocator, encrypted_access_key, unencrypted_access_key))) {
   }
   return ret;
 }

@@ -18,6 +18,7 @@
 #define OCEABASE_COMMON_OB_LOG_PRINT_KV_H_
 #include <cstdarg>
 #include <cerrno>
+#include <inttypes.h>
 #include <type_traits>
 
 #ifdef _WIN32
@@ -276,7 +277,7 @@ int logdata_print_obj(char *buf, const int64_t buf_len, int64_t &pos, const T &o
 template<class T>
 int logdata_print_obj(char *buf, const int64_t buf_len, int64_t &pos, const T &obj, TrueType)
 {
-  return logdata_printf(buf, buf_len, pos, "%ld", static_cast<int64_t>(obj));
+  return logdata_printf(buf, buf_len, pos, "%" PRId64 "", static_cast<int64_t>(obj));
 }
 // print object
 template<class T>
@@ -423,9 +424,9 @@ logdata_print_key_obj(char *buf, const int64_t buf_len, int64_t &pos, const char
   } else {
     if (std::is_integral<T>::value) {
       if (std::is_unsigned<T>::value) {
-        ret = logdata_printf(buf, buf_len, pos, WITH_COMMA("%s=%lu"), key, static_cast<unsigned long>(obj));
+        ret = logdata_printf(buf, buf_len, pos, WITH_COMMA("%s=%" PRIu64), key, static_cast<uint64_t>(obj));
       } else {
-        ret = logdata_printf(buf, buf_len, pos, WITH_COMMA("%s=%ld"), key, static_cast<long>(obj));
+        ret = logdata_printf(buf, buf_len, pos, WITH_COMMA("%s=%" PRId64), key, static_cast<int64_t>(obj));
       }
     } else {
       ret = logdata_printf(buf, buf_len, pos, WITH_COMMA("%s=%g"), key, static_cast<double>(obj));
@@ -457,7 +458,7 @@ template<class T>
 int logdata_print_key_obj(char *buf, const int64_t buf_len, int64_t &pos, const char *key,
                           const bool with_comma, const T &obj, TrueType)
 {
-  return logdata_printf(buf, buf_len, pos, WITH_COMMA("%s=%ld"), key, static_cast<int64_t>(obj));
+  return logdata_printf(buf, buf_len, pos, WITH_COMMA("%s=%" PRId64 ""), key, static_cast<int64_t>(obj));
 }
 // print object
 template<class T>
@@ -499,12 +500,12 @@ int logdata_print_key_obj(char *buf, const int64_t buf_len, int64_t &pos, const 
 inline int logdata_print_key_obj(char *buf, const int64_t buf_len, int64_t &pos, const char *key,
                                  const bool with_comma, const uint64_t obj)
 {
-  return logdata_printf(buf, buf_len, pos, WITH_COMMA("%s=%lu"), key, obj);
+  return logdata_printf(buf, buf_len, pos, WITH_COMMA("%s=%" PRIu64 ""), key, obj);
 }
 inline int logdata_print_key_obj(char *buf, const int64_t buf_len, int64_t &pos, const char *key,
                                  const bool with_comma, const int64_t obj)
 {
-  return logdata_printf(buf, buf_len, pos, WITH_COMMA("%s=%ld"), key, obj);
+  return logdata_printf(buf, buf_len, pos, WITH_COMMA("%s=%" PRId64 ""), key, obj);
 }
 inline int logdata_print_key_obj(char *buf, const int64_t buf_len, int64_t &pos, const char *key,
                                  const bool with_comma, const uint32_t obj)

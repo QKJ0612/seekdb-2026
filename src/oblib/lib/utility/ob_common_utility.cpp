@@ -16,12 +16,16 @@
 
 #define USING_LOG_PREFIX COMMON
 #include "lib/utility/ob_common_utility.h"
+#include <inttypes.h>
 #ifdef _WIN32
 #include <windows.h>
 #endif
 #include "lib/alloc/malloc_hook.h"
 #include "lib/utility/ob_sort.h"
 #include "lib/utility/ob_smart_call.h"
+#ifdef __EMSCRIPTEN__
+#include <emscripten/stack.h>
+#endif
 
 using namespace oceanbase::lib;
 
@@ -46,6 +50,24 @@ int check_stack_overflow(bool &is_overflow,
                          int64_t reserved_size/* default equals 'reserved_stack_size' variable*/,
                          int64_t *used_size/*nullptr*/)
 {
+#ifdef __EMSCRIPTEN__
+  // Inspect the actual Wasm data stack. A C local may be optimized out or sit
+  // above the current SP, and cached native pthread attributes do not describe
+  // a browser Worker's linear-memory stack.
+  const uintptr_t low = emscripten_stack_get_end();
+  const uintptr_t high = emscripten_stack_get_base();
+  const uintptr_t current = emscripten_stack_get_current();
+  is_overflow = true;
+  if (used_size != nullptr) { *used_size = 0; }
+  if (reserved_size < 0) { return OB_INVALID_ARGUMENT; }
+  if (high <= low || current < low || current > high ||
+      static_cast<uint64_t>(reserved_size) > high - low) {
+    return OB_ERR_UNEXPECTED;
+  }
+  if (used_size != nullptr) { *used_size = high - current; }
+  is_overflow = current - low < static_cast<uint64_t>(reserved_size);
+  return OB_SUCCESS;
+#else
   int ret = OB_SUCCESS;
   is_overflow = false;
   size_t stack_size = 0;
@@ -80,10 +102,18 @@ int check_stack_overflow(bool &is_overflow,
     }
   }
   return ret;
+#endif
 }
 
 int get_stackattr(void *&stackaddr, size_t &stacksize)
 {
+#ifdef __EMSCRIPTEN__
+  const uintptr_t low = emscripten_stack_get_end();
+  const uintptr_t high = emscripten_stack_get_base();
+  stackaddr = reinterpret_cast<void *>(low);
+  stacksize = high > low ? high - low : 0;
+  return stacksize > 0 ? OB_SUCCESS : OB_ERR_UNEXPECTED;
+#else
   int ret = OB_SUCCESS;
   if (OB_LIKELY(g_stackaddr != nullptr)) {
     stackaddr = g_stackaddr;
@@ -127,6 +157,7 @@ int get_stackattr(void *&stackaddr, size_t &stacksize)
 #endif
   }
   return ret;
+#endif
 }
 
 void set_stackattr(void *stackaddr, size_t stacksize)
@@ -176,7 +207,7 @@ int64_t ObBasicTimeGuard::to_string(char *buf, const int64_t buf_len) const
     MEMCPY(click_infos, click_infos_, sizeof(click_infos));
     lib::ob_sort(click_infos, click_infos + click_count, ClickInfo::compare);
     ret = databuff_printf(buf, buf_len, pos,
-        "owner: %s, click_count: %ld, time dist:[%s=%d",
+        "owner: %s, click_count: %" PRId64 ", time dist:[%s=%d",
         owner_, click_count_, click_infos[0].mod_, click_infos[0].cost_time_);
     for (int i = 1; OB_SUCC(ret) && i < click_count; ++i) {
       ret = databuff_printf(buf, buf_len, pos, ", %s=%d",

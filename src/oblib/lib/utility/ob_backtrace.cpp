@@ -29,89 +29,17 @@
 
 #include "ob_backtrace.h"
 #include "lib/utility/utility.h"
+#ifdef __EMSCRIPTEN__
+// The pinned Emscripten SDK uses these same entry points for sanitizer stack
+// traces (system/lib/libc/emscripten_internal.h). Wasm has no native FP chain.
+extern "C" uintptr_t emscripten_stack_snapshot(void);
+extern "C" uint32_t emscripten_stack_unwind_buffer(uintptr_t pc, uintptr_t *buffer, uint32_t depth);
+#endif
 
 namespace oceanbase
 {
 namespace common
 {
-int light_backtrace(void **buffer, int size)
-{
-#ifdef _WIN32
-  // The frame-pointer walking implementation below assumes the System V
-  // x86_64 / AArch64 ABI in which RBP / X29 is a real frame pointer and each
-  // frame is laid out as [saved_fp][return_addr][...]. On Windows x64 (MS
-  // ABI) RBP is just an ordinary non-volatile register and can hold any
-  // value the compiler wants (often a base address into a stack object), so
-  // dereferencing it as a saved-FP chain reads arbitrary memory and crashes
-  // with AccessViolation as soon as the chased value lands outside the
-  // mapped stack region. Use the unwind-table based RtlCaptureStackBackTrace
-  // (the kernel-mode-safe Win32 API) instead.
-  if (OB_UNLIKELY(buffer == nullptr || size <= 0)) {
-    return 0;
-  }
-  USHORT frames = ::CaptureStackBackTrace(/*FramesToSkip=*/1,
-                                          static_cast<ULONG>(size),
-                                          buffer,
-                                          /*BackTraceHash=*/nullptr);
-  return static_cast<int>(frames);
-#else
-  int64_t rbp = 0;
-#if defined(__x86_64__)
-  asm("mov %%rbp, %0" : "=r"(rbp));
-#elif defined(__aarch64__)
-  asm("mov %0, x29" : "=r"(rbp));
-#endif
-  return light_backtrace(buffer, size, rbp);
-#endif
-}
-
-int light_backtrace(void **buffer, int size, int64_t rbp)
-{
-#ifdef _WIN32
-  // The provided rbp is meaningless under the Windows x64 ABI; fall back to
-  // the same unwind-table based capture as the 2-arg overload. This keeps
-  // the signal-handler call site (which only fires on POSIX) compiling on
-  // Windows without exposing it to the broken frame-pointer walk.
-  (void)rbp;
-  return light_backtrace(buffer, size);
-#else
-  int rv = 0;
-  if (rv < size) {
-    int (*fp)(void**, int, int64_t) = light_backtrace;
-    buffer[rv++] = (void*)fp;
-  }
-  void *stack_addr = nullptr;
-  size_t stack_size = 0;
-  if (OB_LIKELY(OB_SUCCESS == get_stackattr(stack_addr, stack_size))) {
-#define addr_in_stack(addr) (addr >= (int64_t)stack_addr && addr < (int64_t)stack_addr + stack_size)
-    while (rbp != 0 && rv < size) {
-      // Validate rbp itself before dereferencing it -- otherwise a bogus
-      // saved-FP value silently chained from the previous iteration can
-      // point at unmapped memory and the deref below would crash before
-      // the addr_in_stack check on its loaded value can run.
-      if (!addr_in_stack(rbp)) {
-        break;
-      }
-#if defined(__aarch64__)
-      if (!addr_in_stack(*(int64_t*)rbp) &&
-          !FALSE_IT(rbp += 16) &&
-          !addr_in_stack(*(int64_t*)rbp)) {
-#else
-      if (!addr_in_stack(*(int64_t*)rbp)) {
-#endif
-        break;
-      } else {
-        int64_t return_addr = rbp + 8;
-        buffer[rv++] = (void*)*(int64_t*)return_addr;
-        rbp = *(int64_t*)rbp;
-      }
-    }
-#undef addr_in_stack
-  }
-  return rv;
-#endif
-}
-
 int64_t get_rel_offset(int64_t addr)
 {
   // seekdb is built as a non-PIE (ET_EXEC) executable; backtrace addresses are
@@ -121,7 +49,15 @@ int64_t get_rel_offset(int64_t addr)
 
 bool g_enable_backtrace = true;
 
-#ifdef _WIN32
+#ifdef __EMSCRIPTEN__
+int _ob_backtrace(void **buffer, int size)
+{
+  if (!g_enable_backtrace || buffer == nullptr || size <= 0) { return 0; }
+  const uintptr_t pc = emscripten_stack_snapshot();
+  return static_cast<int>(emscripten_stack_unwind_buffer(
+      pc, reinterpret_cast<uintptr_t *>(buffer), static_cast<uint32_t>(size)));
+}
+#elif defined(_WIN32)
 // Windows implementation of ob_backtrace using CaptureStackBackTrace
 int _ob_backtrace(void** buffer, int size)
 {
@@ -140,19 +76,18 @@ char *lbt()
 {
   void *addrs[MAX_ADDRS_COUNT];
   int size = ob_backtrace(addrs, MAX_ADDRS_COUNT);
-  return parray(*&buffer, LBT_BUFFER_LENGTH, (int64_t *)addrs, size);
+  int64_t offsets[MAX_ADDRS_COUNT];
+  for (int i = 0; i < size; ++i) { offsets[i] = reinterpret_cast<uintptr_t>(addrs[i]); }
+  return parray(*&buffer, LBT_BUFFER_LENGTH, offsets, size);
 }
 
 char *lbt(char *buf, int32_t len)
 {
   void *addrs[MAX_ADDRS_COUNT];
   int size = ob_backtrace(addrs, MAX_ADDRS_COUNT);
-  return parray(buf, len, (int64_t *)addrs, size);
-}
-
-char *parray(int64_t *array, int size)
-{
-  return parray(buffer, LBT_BUFFER_LENGTH, array, size);
+  int64_t offsets[MAX_ADDRS_COUNT];
+  for (int i = 0; i < size; ++i) { offsets[i] = reinterpret_cast<uintptr_t>(addrs[i]); }
+  return parray(buf, len, offsets, size);
 }
 
 char *parray(char *buf, int64_t len, int64_t *array, int size)
@@ -165,9 +100,9 @@ char *parray(char *buf, int64_t len, int64_t *array, int size)
     for (int64_t i = 0; i < size; i++) {
       int64_t addr = get_rel_offset(array[i]);
       if (0 == i) {
-        count = snprintf(buf + pos, len - pos, "0x%lx", addr);
+        count = snprintf(buf + pos, len - pos, "0x%" PRIx64, static_cast<uint64_t>(addr));
       } else {
-        count = snprintf(buf + pos, len - pos, " 0x%lx", addr);
+        count = snprintf(buf + pos, len - pos, " 0x%" PRIx64, static_cast<uint64_t>(addr));
       }
       if (count >= 0 && pos + count < len) {
         pos += count;
@@ -180,32 +115,6 @@ char *parray(char *buf, int64_t len, int64_t *array, int size)
   }
   return buf;
 }
-
-void addrs_to_offsets(void **buffer, int size)
-{
-  for (int64_t i = 0; i < size; i++) {
-    buffer[i] = (void*)get_rel_offset((int64_t)buffer[i]);
-  }
-}
-
-EXTERN_C_BEGIN
-int ob_backtrace_c(void **buffer, int size)
-{
-  return ob_backtrace(buffer, size);
-}
-char *parray_c(char *buf, int64_t len, int64_t *array, int size)
-{
-  return parray(buf, len, array, size);
-}
-int64_t get_rel_offset_c(int64_t addr)
-{
-  return get_rel_offset(addr);
-}
-char *lbt_c()
-{
-  return lbt();
-}
-EXTERN_C_END
 
 } // end namespace common
 } // end namespace oceanbase

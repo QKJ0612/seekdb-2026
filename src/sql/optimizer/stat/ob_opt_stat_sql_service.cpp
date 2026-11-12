@@ -16,8 +16,11 @@
 
 #define USING_LOG_PREFIX COMMON
 #include "ob_opt_stat_sql_service.h"
+#include "lib/compress/ob_compress_util.h"
+#include <inttypes.h>
+#include "common/mysqlclient/ob_isql_connection.h"
+#include "share/ob_dml_sql_splicer.h"
 #include "share/ob_sql_client_decorator.h"
-#include "sql/optimizer/stat/ob_opt_stat_monitor_manager.h"
 
 #define ALL_HISTOGRAM_STAT_COLUMN_NAME "table_id, "      \
                                        "partition_id, "  \
@@ -85,7 +88,7 @@
                                                                                 " spare2 = COALESCE(spare2, 0) + 1," \
                                                                                 "last_analyzed = last_analyzed "
 
-#define UPDATE_TABLE_STAT_FAILCOUNT_VALUE  " (%lu, %ld, 0, 0, 0, -1, -1, 0, 0, -1, -1, 0, 0, 0, 0, 0, 1, 1)"
+#define UPDATE_TABLE_STAT_FAILCOUNT_VALUE  " (%" PRIu64 ", %" PRId64 ", 0, 0, 0, -1, -1, 0, 0, -1, -1, 0, 0, 0, 0, 0, 1, 1)"
 #define REPLACE_COL_STAT_SQL "REPLACE INTO __all_column_stat(table_id," \
                                                               "partition_id," \
                                                               "column_id," \
@@ -239,7 +242,7 @@
                                                 "disk_rnd_read_speed," \
                                                 "network_speed) VALUES " 
 
-#define DELETE_SYSTEM_STAT_SQL "DELETE FROM %s WHERE ID=%ld" 
+#define DELETE_SYSTEM_STAT_SQL "DELETE FROM %s WHERE ID=%" PRId64
 
 // __all_aux_stat holds a single system-stat row; its rowkey id is fixed.
 static const int64_t OB_SYSTEM_STAT_SINGLETON_ID = 1;
@@ -299,7 +302,7 @@ int ObOptStatSqlService::fetch_table_stat(const ObOptTableStat::Key &key,
                                       "stale_stats as stale_stats,"
                                       "last_analyzed,"
                                       "spare1 as sample_size FROM %s ", share::OB_ALL_TABLE_STAT_TNAME))) {
-    } else if (OB_FAIL(sql.append_fmt(" WHERE TABLE_ID=%ld",
+    } else if (OB_FAIL(sql.append_fmt(" WHERE TABLE_ID=%" PRIu64 "",
                                       ObSchemaUtils::get_extract_schema_id(key.table_id_)))) {
     } else if (OB_FAIL(sql_client_retry_weak.read(res, sql.ptr()))) {
     } else if (NULL == (result = res.get_result())) {
@@ -375,7 +378,7 @@ int ObOptStatSqlService::batch_fetch_table_stats(const uint64_t table_id,
                                       share::OB_ALL_TABLE_STAT_TNAME))) {
     } else if (OB_FAIL(generate_in_list(part_ids, part_list))) {
     } else if (!part_list.empty() && OB_FAIL(part_str.append_fmt(" AND partition_id in %s", part_list.ptr()))) {
-    } else if (OB_FAIL(sql.append_fmt(" WHERE TABLE_ID=%ld %s",
+    } else if (OB_FAIL(sql.append_fmt(" WHERE TABLE_ID=%" PRIu64 " %s",
                                       ObSchemaUtils::get_extract_schema_id(table_id),
                                       !part_str.empty() ? part_str.ptr() : " "))) {
     } else if (conn != NULL && OB_FAIL(conn->execute_read(sql.ptr(), res))) {
@@ -546,7 +549,7 @@ int ObOptStatSqlService::construct_delete_column_histogram_sql(const ObIArray<Ob
   for (int64_t i = 0; OB_SUCC(ret) && i < column_stats.count(); ++i) {
     if (OB_ISNULL(column_stats.at(i))) {
       ret = OB_ERR_UNEXPECTED;
-    } else if (where_str.append_fmt(" %s (%ld, %ld, %lu) %s",
+    } else if (where_str.append_fmt(" %s (%" PRIu64 ", %" PRId64 ", %" PRIu64 ") %s",
                                      i != 0 ? "," : "(TABLE_ID, PARTITION_ID, COLUMN_ID) IN (",
                                      ObSchemaUtils::get_extract_schema_id(column_stats.at(i)->get_table_id()),
                                      column_stats.at(i)->get_partition_id(),
@@ -631,11 +634,11 @@ int ObOptStatSqlService::delete_table_stat(const uint64_t table_id,
   } else if (OB_FAIL(generate_in_list(part_ids, in_list))) {
   } else if (degree > 1 &&
             OB_FAIL(hint_str.append_fmt(
-              "ENABLE_PARALLEL_DML parallel(%ld)",
+              "ENABLE_PARALLEL_DML parallel(%" PRId64 ")",
               degree
             ))) {
   } else if (OB_FAIL(where_str.append_fmt(
-                      "table_id = %ld %s%s;",
+                      "table_id = %" PRIu64 " %s%s;",
                       ObSchemaUtils::get_extract_schema_id(table_id),
                       has_part ? "AND partition_id in " : "",
                       has_part ? in_list.ptr() : ""))) {
@@ -712,9 +715,9 @@ int ObOptStatSqlService::delete_column_stat(const uint64_t table_id,
   } else if (OB_FAIL(generate_in_list(partition_ids, partition_list))) {
   } else if (OB_FAIL(generate_in_list(column_ids, column_list))) {
   } else if (degree > 1 &&
-            OB_FAIL(hint_str.append_fmt("ENABLE_PARALLEL_DML parallel(%ld)",degree))) {
+            OB_FAIL(hint_str.append_fmt("ENABLE_PARALLEL_DML parallel(%" PRId64 ")",degree))) {
   } else if (OB_FAIL(where_str.append_fmt(
-                      "table_id = %ld and column_id in %s %s%s;",
+                      "table_id = %" PRIu64 " and column_id in %s %s%s;",
                       ObSchemaUtils::get_extract_schema_id(table_id),
                       column_list.ptr(),
                       has_part ? "AND partition_id in " : "",
@@ -728,7 +731,7 @@ int ObOptStatSqlService::delete_column_stat(const uint64_t table_id,
                        where_str.string().ptr()))) {
   } else if (FALSE_IT(hint_str.reuse())) {
   } else if (degree > 1 &&
-            OB_FAIL(hint_str.append_fmt("ENABLE_PARALLEL_DML parallel(%ld)",degree))) {
+            OB_FAIL(hint_str.append_fmt("ENABLE_PARALLEL_DML parallel(%" PRId64 ")",degree))) {
   } else if (OB_FAIL(write_cstat.append_fmt(
                     (only_histogram ? UPDATE_HISTOGRAM_TYPE_SQL :  DELETE_COL_STAT_SQL),
                     hint_str.string().length(),
@@ -821,7 +824,7 @@ int ObOptStatSqlService::get_column_stat_sql(ObIAllocator &allocator,
   } else if (stat.get_llc_bitmap_size() <= 0) {
     // do nothing
   } else if (OB_FAIL(get_compressed_llc_bitmap(allocator,
-                                               bitmap_compress_lib_name[ObOptStatCompressType::ZSTD_1_3_8_COMPRESS],
+                                               bitmap_compress_lib_name[ObOptStatCompressType::ZSTD_COMPRESS],
                                                stat.get_llc_bitmap(),
                                                stat.get_llc_bitmap_size(),
                                                llc_comp_buf,
@@ -856,7 +859,7 @@ int ObOptStatSqlService::get_column_stat_sql(ObIAllocator &allocator,
         OB_FAIL(dml_splicer.add_column("histogram_type", stat.get_histogram().get_type())) ||
         OB_FAIL(dml_splicer.add_column("global_stats", 0)) ||
         OB_FAIL(dml_splicer.add_column("user_stats", 0)) ||
-        OB_FAIL(dml_splicer.add_column("spare1", ObOptStatCompressType::ZSTD_1_3_8_COMPRESS))) {
+        OB_FAIL(dml_splicer.add_column("spare1", ObOptStatCompressType::ZSTD_COMPRESS))) {
     } else if (OB_FAIL(dml_splicer.splice_values(sql_string))) {
     } else { /*do nothing*/ }
   }
@@ -1005,7 +1008,7 @@ int ObOptStatSqlService::fill_table_stat(common::sqlclient::ObMySQLResult &resul
     } else {
       stat.set_last_analyzed(static_cast<int64_t>(int_value));
       if (!stat.is_locked()) {
-        stat.set_stat_expired_time(ObTimeUtility::current_time() + ObOptStatMonitorCheckTask::CHECK_INTERVAL);
+        stat.set_stat_expired_time(ObTimeUtility::current_time() + OPT_STATS_MAINTENANCE_INTERVAL_US);
       }
     }
     EXTRACT_INT_FIELD_TO_CLASS_MYSQL_SKIP_RET(result, sample_size, stat, int64_t);
@@ -1179,7 +1182,7 @@ int ObOptStatSqlService::fill_column_stat(ObIAllocator &allocator,
           char *bitmap_buf = NULL;
           if (OB_SUCC(ret) && llc_bitmap_size > 0) {
             int64_t compress_type = ObOptStatCompressType::MAX_COMPRESS;
-            EXTRACT_INT_FIELD_MYSQL_WITH_DEFAULT_VALUE(result, "compress_type", compress_type, int64_t, true, false, ObOptStatCompressType::ZSTD_1_3_8_COMPRESS);
+            EXTRACT_INT_FIELD_MYSQL_WITH_DEFAULT_VALUE(result, "compress_type", compress_type, int64_t, true, false, ObOptStatCompressType::ZSTD_COMPRESS);
             if (OB_SUCC(ret)) {
               if (OB_UNLIKELY(compress_type < 0 || compress_type >= ObOptStatCompressType::MAX_COMPRESS)) {
                 ret = OB_ERR_UNEXPECTED;
@@ -1236,29 +1239,30 @@ int ObOptStatSqlService::get_compressed_llc_bitmap(ObIAllocator &allocator,
                                                    int64_t &comp_size)
 {
   int ret = OB_SUCCESS;
-  ObCompressor *compressor  = NULL;
+  ObCompressorType compressor_type = INVALID_COMPRESSOR;
   int64_t max_comp_size = 0;
   if (NULL == bitmap_buf || bitmap_size <= 0 || bitmap_compress_name == NULL) {
     ret = common::OB_INVALID_ARGUMENT;
     COMMON_LOG(WARN, "invalid arguments.", KP(bitmap_buf), K(bitmap_size), K(bitmap_compress_name), K(ret));
-  } else if (OB_FAIL(ObCompressorPool::get_instance().get_compressor(
-      bitmap_compress_name, compressor))) {
-  } else if (NULL == compressor) {
-    ret = OB_ERR_UNEXPECTED;
-    COMMON_LOG(WARN, "compressor is NULL, do not compress data.",
-               K(bitmap_compress_name), K(ret));
-  } else if (OB_FAIL(compressor->get_max_overflow_size(bitmap_size, max_comp_size))) {
+  } else if (OB_FAIL(get_compressor_type(bitmap_compress_name, compressor_type))) {
+  } else if (compressor_type == NONE_COMPRESSOR) {
+    comp_buf = const_cast<char*>(bitmap_buf);
+    comp_size = bitmap_size;
   } else {
-    max_comp_size += bitmap_size;
-    if (NULL == (comp_buf = static_cast<char*>(allocator.alloc(max_comp_size)))) {
+    const auto bound = compression::compress_bound(
+        static_cast<uint8_t>(compressor_type), bitmap_size);
+    if (OB_FAIL(compression_error_code(bound.code))) {
+    } else if (FALSE_IT(max_comp_size = static_cast<int64_t>(bound.size))) {
+    } else if (NULL == (comp_buf = static_cast<char*>(allocator.alloc(max_comp_size)))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
       COMMON_LOG(ERROR, "cannot allocate compressed buffer.",
                  K(max_comp_size), K(ret));
-    } else if (OB_FAIL(compressor->compress(bitmap_buf,
-                                            bitmap_size,
-                                            comp_buf,
-                                            max_comp_size,
-                                            comp_size))) {
+    } else if (const auto result = compression::compress(
+                   static_cast<uint8_t>(compressor_type),
+                   reinterpret_cast<const uint8_t *>(bitmap_buf), bitmap_size,
+                   reinterpret_cast<uint8_t *>(comp_buf), max_comp_size);
+               OB_FAIL(compression_error_code(result.code))) {
+    } else if (FALSE_IT(comp_size = static_cast<int64_t>(result.size))) {
     } else if (comp_size >= bitmap_size) {
       // compress is not work, just use original data.
       comp_buf = const_cast<char*>(bitmap_buf);
@@ -1277,7 +1281,7 @@ int ObOptStatSqlService::get_decompressed_llc_bitmap(ObIAllocator &allocator,
 {
   int ret = OB_SUCCESS;
   const int64_t max_bitmap_size = ObOptColumnStat::NUM_LLC_BUCKET; // max size of uncompressed buffer.
-  ObCompressor* compressor = NULL;
+  ObCompressorType compressor_type = INVALID_COMPRESSOR;
 
   if (OB_ISNULL(bitmap_compress_name)) {
     ret = OB_ERR_UNEXPECTED;
@@ -1288,15 +1292,14 @@ int ObOptStatSqlService::get_decompressed_llc_bitmap(ObIAllocator &allocator,
   } else if (NULL == (bitmap_buf = static_cast<char*>(allocator.alloc(max_bitmap_size)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
     LOG_ERROR("allocate memory for uncompressed data failed.", K(max_bitmap_size), K(ret));
-  } else if (OB_FAIL(ObCompressorPool::get_instance().get_compressor(
-      bitmap_compress_name, compressor)))  {
-  } else if (NULL == compressor) {
-    ret = OB_ERR_UNEXPECTED;
-  } else if (OB_FAIL(compressor->decompress(comp_buf,
-                                            comp_size,
-                                            bitmap_buf,
-                                            max_bitmap_size,
-                                            bitmap_size))) {
+  } else if (OB_FAIL(get_compressor_type(bitmap_compress_name, compressor_type))) {
+  } else if (const auto result = compression::decompress(
+                 static_cast<uint8_t>(compressor_type),
+                 reinterpret_cast<const uint8_t *>(comp_buf), comp_size,
+                 reinterpret_cast<uint8_t *>(bitmap_buf), max_bitmap_size);
+             OB_FAIL(compression_error_code(result.code))) {
+  } else {
+    bitmap_size = static_cast<int64_t>(result.size);
   }
   return ret;
 }
@@ -1307,7 +1310,7 @@ int ObOptStatSqlService::generate_in_list(const ObIArray<int64_t> &list, ObSqlSt
   for (int64_t i = 0; OB_SUCC(ret) && i < list.count(); i++) {
     char prefix = (i == 0 ? '(' : ' ');
     char suffix = (i == list.count() - 1 ? ')' : ',');
-    if (OB_FAIL(sql_string.append_fmt("%c%ld%c", prefix, list.at(i), suffix))) {
+    if (OB_FAIL(sql_string.append_fmt("%c%" PRId64 "%c", prefix, list.at(i), suffix))) {
     }
   }
   return ret;
@@ -1319,7 +1322,7 @@ int ObOptStatSqlService::generate_in_list(const ObIArray<uint64_t> &list, ObSqlS
   for (int64_t i = 0; OB_SUCC(ret) && i < list.count(); i++) {
     char prefix = (i == 0 ? '(' : ' ');
     char suffix = (i == list.count() - 1 ? ')' : ',');
-    if (OB_FAIL(sql_string.append_fmt("%c%ld%c", prefix, list.at(i), suffix))) {
+    if (OB_FAIL(sql_string.append_fmt("%c%" PRIu64 "%c", prefix, list.at(i), suffix))) {
     }
   }
   return ret;
@@ -1387,7 +1390,7 @@ int ObOptStatSqlService::generate_specified_keys_list_str_for_column(ObIArray<Ob
           if (OB_FAIL(partition_ids_map.get_refactored(key_col_stats.at(i).key_->partition_id_, tmp_var))) {
             if (OB_HASH_NOT_EXIST == ret) {
               ret = OB_SUCCESS;
-              if (OB_FAIL(partition_list_str.append_fmt("%s%ld", i == 0 ? "" : ",",
+              if (OB_FAIL(partition_list_str.append_fmt("%s%" PRId64 "", i == 0 ? "" : ",",
                                                          key_col_stats.at(i).key_->partition_id_))) {
               } else if (OB_FAIL(partition_ids_map.set_refactored(key_col_stats.at(i).key_->partition_id_, true))) {
               } else {/*do nothing*/}
@@ -1399,7 +1402,7 @@ int ObOptStatSqlService::generate_specified_keys_list_str_for_column(ObIArray<Ob
             if (OB_FAIL(column_ids_map.get_refactored(key_col_stats.at(i).key_->column_id_, tmp_var))) {
               if (OB_HASH_NOT_EXIST == ret) {
                 ret = OB_SUCCESS;
-                if (OB_FAIL(column_list_str.append_fmt("%s%lu", i == 0 ? "" : ",",
+                if (OB_FAIL(column_list_str.append_fmt("%s%" PRIu64 "", i == 0 ? "" : ",",
                                                         key_col_stats.at(i).key_->column_id_))) {
                 } else if (OB_FAIL(column_ids_map.set_refactored(key_col_stats.at(i).key_->column_id_, true))) {
                 } else {/*do nothing*/}
@@ -1412,7 +1415,7 @@ int ObOptStatSqlService::generate_specified_keys_list_str_for_column(ObIArray<Ob
     }
     if (OB_SUCC(ret)) {
       
-      if (OB_FAIL(keys_list_str.append_fmt(" (col_stat.TABLE_ID=%ld AND col_stat.PARTITION_ID IN (%.*s) AND col_stat.COLUMN_ID IN (%.*s))",
+      if (OB_FAIL(keys_list_str.append_fmt(" (col_stat.TABLE_ID=%" PRIu64 " AND col_stat.PARTITION_ID IN (%.*s) AND col_stat.COLUMN_ID IN (%.*s))",
                                             ObSchemaUtils::get_extract_schema_id(table_id),
                                             partition_list_str.string().length(),
                                             partition_list_str.string().ptr(),
@@ -1680,7 +1683,7 @@ int ObOptStatSqlService::fetch_table_rowcnt(const uint64_t table_id,
   } else if (OB_FAIL(raw_sql.append_fmt("select /*+opt_param('enable_in_range_optimization','true') opt_param('use_default_opt_stat','true')*/"\
                                          "tablet_id, max(row_count) from "\
                                          "(select cast(tablet_id as unsigned) as tablet_id, cast(inserts - deletes as signed) as row_count "\
-                                         "from %s where table_id = %lu and tablet_id in %s union all "\
+                                         "from %s where table_id = %" PRIu64 " and tablet_id in %s union all "\
                                          "select cast(tablet_id as unsigned) as tablet_id, cast(row_count as signed) as row_count from %s, "\
                                          "(select frozen_scn from %s order by frozen_scn desc limit 1) where "\
                                          "compaction_scn = frozen_scn and (tablet_id) in %s) group by tablet_id;",
@@ -1698,7 +1701,7 @@ int ObOptStatSqlService::fetch_table_rowcnt(const uint64_t table_id,
       } else if (OB_ISNULL(client_result = proxy_result.get_result())) {
         ret = OB_ERR_UNEXPECTED;
       } else {
-        int64_t expired_time = ObTimeUtility::current_time() + ObOptStatMonitorCheckTask::CHECK_INTERVAL;
+        int64_t expired_time = ObTimeUtility::current_time() + OPT_STATS_MAINTENANCE_INTERVAL_US;
         while (OB_SUCC(ret)) {
           int64_t tablet_idx = 0;
           int64_t row_cnt_idx = 1;
@@ -1743,11 +1746,11 @@ int ObOptStatSqlService::gen_tablet_list_str(const ObIArray<ObTabletID> &all_tab
     for (int64_t i = 0; OB_SUCC(ret) && i < all_tablet_ids.count(); ++i) {
       char prefix = i == 0 ? '(' : ' ';
       char suffix = i == all_tablet_ids.count() - 1 ? ')' : ',';
-      if (OB_FAIL(tablet_list_str.append_fmt("%c%lu%c",
+      if (OB_FAIL(tablet_list_str.append_fmt("%c%" PRIu64 "%c",
                                              prefix,
                                              all_tablet_ids.at(i).id(),
                                              suffix))) {
-      } else if (OB_FAIL(tablet_tuple_list_str.append_fmt("%c(%lu)%c",
+      } else if (OB_FAIL(tablet_tuple_list_str.append_fmt("%c(%" PRIu64 ")%c",
                                                           prefix,
                                                           all_tablet_ids.at(i).id(),
                                                           suffix))) {
@@ -1795,7 +1798,7 @@ int ObOptStatSqlService::get_update_fail_count_value_list(const uint64_t table_i
   int ret = OB_SUCCESS;
   if (part_ids.empty()) {
     value_str.append_fmt(UPDATE_TABLE_STAT_FAILCOUNT_VALUE,
-                                 table_id, -1l);
+                                 table_id, INT64_C(-1));
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < part_ids.count(); ++i) {
     ObSqlString value;
