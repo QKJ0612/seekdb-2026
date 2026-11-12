@@ -52,6 +52,11 @@ public:
                                  const uint8_t char_len,
                                  CharType &type);
 
+  static int classify_first_char_utf8mb4_fast(const char *input,
+                                              const int64_t buf_size,
+                                              uint8_t &char_len,
+                                              CharType &type);
+
   static int check_cn_number(ObCollationType coll_type,
                              const char *input,
                              const uint8_t char_len,
@@ -466,6 +471,90 @@ inline int ObFTCharUtil::do_classify(const char *input, const uint8_t char_len, 
   } else if (OB_FAIL(is_surrogate_low<CS_TYPE>(input, char_len, checker))) {
   } else if (checker) {
     type = CharType::SURROGATE_LOW;
+  }
+  return ret;
+}
+
+// Fast UTF8MB4 classification: decode once, classify once.
+// ASCII takes a single-byte fast path. Invalid sequences return OB_INVALID_ARGUMENT
+// so callers can fall back to the legacy well_formed_len + classify path.
+inline int ObFTCharUtil::classify_first_char_utf8mb4_fast(const char *input,
+                                                          const int64_t buf_size,
+                                                          uint8_t &char_len,
+                                                          CharType &type)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(OB_ISNULL(input) || buf_size <= 0)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    const unsigned char c = static_cast<unsigned char>(input[0]);
+    if (c < 0x80) {
+      char_len = 1;
+      if ((c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a)) {
+        type = CharType::ENGLISH_LETTER;
+      } else if (c >= 0x30 && c <= 0x39) {
+        type = CharType::ARABIC_LETTER;
+      } else {
+        type = CharType::USELESS;
+      }
+    } else {
+      int64_t len = 0;
+      if (c >= 0xC2 && c < 0xE0) {
+        len = 2;
+      } else if (c >= 0xE0 && c < 0xF0) {
+        len = 3;
+      } else if (c >= 0xF0 && c < 0xF5) {
+        len = 4;
+      } else {
+        ret = OB_INVALID_ARGUMENT;
+      }
+      if (OB_SUCC(ret)) {
+        if (buf_size < len) {
+          ret = OB_INVALID_ARGUMENT;
+        } else {
+          const unsigned char *u = reinterpret_cast<const unsigned char *>(input);
+          bool ok = true;
+          for (int64_t i = 1; i < len && ok; ++i) {
+            ok = (u[i] & 0xC0) == 0x80;
+          }
+          if (ok) {
+            // reject overlongs / surrogates / out-of-range explicitly
+            if (len == 2) {
+              // c >= 0xC2 already checked
+            } else if (len == 3) {
+              if (c == 0xE0 && u[1] < 0xA0) ok = false;
+              else if (c == 0xED && u[1] >= 0xA0) ok = false;
+            } else {
+              if (c == 0xF0 && u[1] < 0x90) ok = false;
+              else if (c == 0xF4 && u[1] >= 0x90) ok = false;
+            }
+          }
+          if (!ok) {
+            ret = OB_INVALID_ARGUMENT;
+          } else {
+            ob_wc_t unicode = 0;
+            const unsigned char *uend = u + len;
+            int code_size = common::ob_charset_decode_unicode<CHARSET_UTF8MB4>(u, uend, unicode);
+            if (OB_UNLIKELY(code_size != len)) {
+              ret = OB_INVALID_ARGUMENT;
+            } else {
+              char_len = static_cast<uint8_t>(len);
+              if (ObUnicodeBlockUtils::is_alpha(unicode)) {
+                type = CharType::ENGLISH_LETTER;
+              } else if (ObUnicodeBlockUtils::is_arabic(unicode)) {
+                type = CharType::ARABIC_LETTER;
+              } else if (ObUnicodeBlockUtils::is_chinese(unicode)) {
+                type = CharType::CHINESE;
+              } else if (ObUnicodeBlockUtils::is_other_cjk(unicode)) {
+                type = CharType::OTHER_CJK;
+              } else {
+                type = CharType::USELESS;
+              }
+            }
+          }
+        }
+      }
+    }
   }
   return ret;
 }

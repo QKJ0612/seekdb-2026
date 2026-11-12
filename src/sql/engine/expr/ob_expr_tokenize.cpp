@@ -31,6 +31,8 @@
 #include "data_plane/fts/ob_fts_parser_helper.h"
 #include "data_plane/fts/dict/ob_gen_dic_loader.h"
 #include "data_plane/fts/ob_fts_parser_property.h"
+#include <chrono>
+#include <string>
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "sql/engine/expr/ob_expr_json_func_helper.h" // file not self-contained, there're logs inside.
@@ -221,16 +223,33 @@ int ObExprTokenize::parse_param(const ObExpr &expr,
 int ObExprTokenize::construct_ft_parser_inner_name(const ObString &input_str, TokenizeParam &param)
 {
   int ret = OB_SUCCESS;
-  storage::ObFTParser parser;
-
+  struct NameCacheEntry {
+    std::string key;
+    std::string val;
+    bool valid = false;
+  };
+  static thread_local NameCacheEntry cache;
   char *parser_name_buf = nullptr;
   if (OB_ISNULL(parser_name_buf
                 = static_cast<char *>(param.allocator_.alloc(storage::OB_FT_PARSER_NAME_LENGTH)))) {
     ret = OB_ALLOCATE_MEMORY_FAILED;
-  } else if (OB_FAIL(parser.init(input_str))) {
-  } else if (OB_FAIL(parser.serialize_to_str(parser_name_buf, storage::OB_FT_PARSER_NAME_LENGTH))) {
-  } else {
+  } else if (input_str.length() < 128 && cache.valid
+             && static_cast<size_t>(input_str.length()) == cache.key.size()
+             && 0 == MEMCMP(input_str.ptr(), cache.key.data(), input_str.length())) {
+    MEMCPY(parser_name_buf, cache.val.data(), cache.val.size() + 1);
     param.parser_name_ = ObString::make_string(parser_name_buf);
+  } else {
+    storage::ObFTParser parser;
+    if (OB_FAIL(parser.init(input_str))) {
+    } else if (OB_FAIL(parser.serialize_to_str(parser_name_buf, storage::OB_FT_PARSER_NAME_LENGTH))) {
+    } else {
+      param.parser_name_ = ObString::make_string(parser_name_buf);
+      if (input_str.length() < 128) {
+        cache.key.assign(input_str.ptr(), input_str.length());
+        cache.val.assign(parser_name_buf);
+        cache.valid = true;
+      }
+    }
   }
   return ret;
 }
@@ -375,17 +394,52 @@ int ObExprTokenize::parse_parser_properties(const ObExpr &expr,
 int ObExprTokenize::TokenizeParam::reform_parser_properties(const ObString &properties)
 {
   int ret = OB_SUCCESS;
-  storage::ObFTParserJsonProps parser_properties;
-
-  if (OB_FAIL(parser_properties.init())) {
-  } else if (OB_FAIL(parser_properties.parse_from_valid_str(properties))) {
-    LOG_USER_ERROR(OB_INVALID_ARGUMENT, "parser properties invalid.");
-  } else if (OB_FAIL(parser_properties.rebuild_props_for_ddl(parser_name_,
-                                                             ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                                                             true))) {
-  } else if (OB_FAIL(parser_properties.to_format_json(allocator_, properties_))) {
+  struct ReformCacheEntry {
+    std::string key;
+    std::string val;
+    bool valid = false;
+  };
+  static thread_local ReformCacheEntry cache;
+  if (parser_name_.length() < 128 && properties.length() < 512) {
+    std::string key;
+    key.reserve(parser_name_.length() + 1 + properties.length());
+    key.append(parser_name_.ptr(), parser_name_.length());
+    key.push_back('\n');
+    key.append(properties.ptr(), properties.length());
+    if (cache.valid && cache.key == key) {
+      char *buf = nullptr;
+      if (OB_ISNULL(buf = static_cast<char *>(allocator_.alloc(cache.val.size())))) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        MEMCPY(buf, cache.val.data(), cache.val.size());
+        properties_.assign_ptr(buf, static_cast<int32_t>(cache.val.size()));
+      }
+    } else {
+      storage::ObFTParserJsonProps parser_properties;
+      if (OB_FAIL(parser_properties.init())) {
+      } else if (OB_FAIL(parser_properties.parse_from_valid_str(properties))) {
+        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "parser properties invalid.");
+      } else if (OB_FAIL(parser_properties.rebuild_props_for_ddl(parser_name_,
+                                                                 ObCollationType::CS_TYPE_UTF8MB4_BIN,
+                                                                 true))) {
+      } else if (OB_FAIL(parser_properties.to_format_json(allocator_, properties_))) {
+      } else {
+        cache.key = std::move(key);
+        cache.val.assign(properties_.ptr(), properties_.length());
+        cache.valid = true;
+      }
+    }
+  } else {
+    storage::ObFTParserJsonProps parser_properties;
+    if (OB_FAIL(parser_properties.init())) {
+    } else if (OB_FAIL(parser_properties.parse_from_valid_str(properties))) {
+      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "parser properties invalid.");
+    } else if (OB_FAIL(parser_properties.rebuild_props_for_ddl(parser_name_,
+                                                               ObCollationType::CS_TYPE_UTF8MB4_BIN,
+                                                               true))) {
+    } else if (OB_FAIL(parser_properties.to_format_json(allocator_, properties_))) {
+    }
   }
-
   return ret;
 }
 

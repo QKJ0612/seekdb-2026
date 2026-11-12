@@ -20,6 +20,8 @@
 
 #include "storage/fts/ob_fts_parser_helper.h"
 
+#include <string>
+
 #include "common/json_type/ob_json_tree.h"
 #include "share/ob_force_print_log.h"
 #include "storage/fts/dict/ob_ft_dict_hub.h"
@@ -335,14 +337,45 @@ int ObFTParseHelper::init(
   } else if (OB_ISNULL(allocator) || OB_UNLIKELY(parser_name.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(parser_name_.parse_from_str(parser_name.ptr(), parser_name.length()))) {
-  } else if (OB_FAIL(parser_property_.parse_for_parser_helper(parser_name_, parser_properties))) {
-  } else if (OB_FAIL(parser_name_.get_desc(parser_desc_))) {
-  } else if (OB_ISNULL(parser_desc_)) {
-    ret = OB_ERR_UNEXPECTED;
-  } else if (OB_FAIL(set_add_word_flag(*parser_desc_))) {
   } else {
-    allocator_ = allocator;
-    is_inited_ = true;
+    struct InitCacheEntry {
+      std::string key;
+      bool valid = false;
+      ObFTParserProperty prop;
+      const ObIFTParserDesc *desc = nullptr;
+    };
+    static thread_local InitCacheEntry cache;
+    const bool cacheable = parser_name.length() < 128 && parser_properties.length() < 512;
+    bool hit = false;
+    if (cacheable) {
+      std::string key;
+      key.reserve(parser_name.length() + 1 + parser_properties.length());
+      key.append(parser_name.ptr(), parser_name.length());
+      key.push_back('\n');
+      key.append(parser_properties.ptr(), parser_properties.length());
+      if (cache.valid && cache.key == key) {
+        parser_property_ = cache.prop;
+        parser_desc_ = cache.desc;
+        hit = true;
+      } else {
+        cache.key = std::move(key);
+        cache.valid = false;
+      }
+    }
+    if (!hit && OB_FAIL(parser_property_.parse_for_parser_helper(parser_name_, parser_properties))) {
+    } else if (!hit && OB_FAIL(parser_name_.get_desc(parser_desc_))) {
+    } else if (OB_ISNULL(parser_desc_)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(set_add_word_flag(*parser_desc_))) {
+    } else {
+      if (!hit && cacheable) {
+        cache.prop = parser_property_;
+        cache.desc = parser_desc_;
+        cache.valid = true;
+      }
+      allocator_ = allocator;
+      is_inited_ = true;
+    }
   }
   if (OB_FAIL(ret) && OB_UNLIKELY(!is_inited_)) {
     reset();

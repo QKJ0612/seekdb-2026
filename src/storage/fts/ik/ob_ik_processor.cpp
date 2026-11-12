@@ -102,10 +102,32 @@ int TokenizeContext::current_char_type(ObFTCharUtil::CharType &type)
 int TokenizeContext::prepare_next_char()
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
-                                          fulltext_ + cursor_,
-                                          fulltext_len_ - cursor_,
-                                          next_char_len_))) {
+  if (ObCharset::charset_type_by_coll(coll_type_) == CHARSET_UTF8MB4) {
+    // hot path: single decode + classification, ASCII fast path inside
+    uint8_t fast_char_len = 0;
+    if (OB_FAIL(ObFTCharUtil::classify_first_char_utf8mb4_fast(fulltext_ + cursor_,
+                                                               fulltext_len_ - cursor_,
+                                                               fast_char_len,
+                                                               next_char_type_))) {
+
+      // invalid sequence: fall back to legacy path to keep semantics
+      ret = OB_SUCCESS;
+      if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
+                                              fulltext_ + cursor_,
+                                              fulltext_len_ - cursor_,
+                                              next_char_len_))) {
+      } else if (OB_FAIL(ObFTCharUtil::classify_first_char(coll_type_,
+                                                           fulltext_ + cursor_,
+                                                           next_char_len_,
+                                                           next_char_type_))) {
+      }
+    } else {
+      next_char_len_ = fast_char_len;
+    }
+  } else if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
+                                                 fulltext_ + cursor_,
+                                                 fulltext_len_ - cursor_,
+                                                 next_char_len_))) {
   } else if (OB_FAIL(ObFTCharUtil::classify_first_char(coll_type_,
                                                        fulltext_ + cursor_,
                                                        next_char_len_,
