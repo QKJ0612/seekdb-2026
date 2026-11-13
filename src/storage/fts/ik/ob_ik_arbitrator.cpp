@@ -107,8 +107,37 @@ int ObIKArbitrator::process(TokenizeContext &ctx)
   return ret;
 }
 
-int ObIKArbitrator::output_result(TokenizeContext &ctx)
+// Fused decode + classification for one character, mirroring the tokenizer hot
+// loop: for utf8mb4 it uses the same single-pass fast path, and falls back to the
+// generic charset functions on any invalid sequence so semantics are unchanged.
+static int classify_char_fast(const ObCollationType coll_type,
+                              const char *ptr,
+                              const int64_t remain,
+                              int64_t &char_len,
+                              ObFTCharUtil::CharType &type)
 {
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(OB_ISNULL(ptr) || remain <= 0)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (ObCharset::charset_type_by_coll(coll_type) == CHARSET_UTF8MB4) {
+    uint8_t fast_len = 0;
+    if (OB_FAIL(ObFTCharUtil::classify_first_char_utf8mb4_fast(ptr, remain, fast_len, type))) {
+      ret = OB_SUCCESS;
+      if (OB_FAIL(ObCharset::first_valid_char(coll_type, ptr, remain, char_len))) {
+      } else if (OB_FAIL(ObFTCharUtil::classify_first_char(
+                           coll_type, ptr, static_cast<uint8_t>(char_len), type))) {
+      }
+    } else {
+      char_len = static_cast<int64_t>(fast_len);
+    }
+  } else if (OB_FAIL(ObCharset::first_valid_char(coll_type, ptr, remain, char_len))) {
+  } else if (OB_FAIL(ObFTCharUtil::classify_first_char(
+                       coll_type, ptr, static_cast<uint8_t>(char_len), type))) {
+  }
+  return ret;
+}
+
+int ObIKArbitrator::output_result(TokenizeContext &ctx){
   int ret = OB_SUCCESS;
 
   int64_t char_len = 0;
@@ -116,14 +145,11 @@ int ObIKArbitrator::output_result(TokenizeContext &ctx)
   for (int64_t current = 0; OB_SUCC(ret) && current < ctx.fulltext_len();) {
     ObFTCharUtil::CharType type;
     // maybe not so good to keep single, check it later
-    if (OB_FAIL(ObCharset::first_valid_char(ctx.collation(),
-                                            ctx.fulltext() + current,
-                                            ctx.fulltext_len() - current,
-                                            char_len))) {
-    } else if (OB_FAIL(ObFTCharUtil::classify_first_char(ctx.collation(),
-                                                         ctx.fulltext() + current,
-                                                         char_len,
-                                                         type))) {
+    if (OB_FAIL(classify_char_fast(ctx.collation(),
+                                   ctx.fulltext() + current,
+                                   ctx.fulltext_len() - current,
+                                   char_len,
+                                   type))) {
     } else if (ObFTCharUtil::CharType::USELESS == type) {
       current += char_len; // skip useless char
     } else if (OB_FAIL(chains_.get_refactored(current, chain)) && OB_HASH_NOT_EXIST != ret) {
@@ -166,10 +192,12 @@ int ObIKArbitrator::output_result(TokenizeContext &ctx)
         } else {
           // output single word between two token
           while (OB_SUCC(ret) && current < token.offset_) {
-            if (OB_FAIL(ObCharset::first_valid_char(ctx.collation(),
-                                                    ctx.fulltext() + current,
-                                                    ctx.fulltext_len() - current,
-                                                    char_len))) {
+            ObFTCharUtil::CharType gap_type;
+            if (OB_FAIL(classify_char_fast(ctx.collation(),
+                                           ctx.fulltext() + current,
+                                           ctx.fulltext_len() - current,
+                                           char_len,
+                                           gap_type))) {
               break;
             } else {
               ObIKToken token;
