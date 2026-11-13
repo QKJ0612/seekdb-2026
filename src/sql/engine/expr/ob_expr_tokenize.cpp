@@ -83,16 +83,65 @@ int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,
                                       ObIJsonBase *&result)
 {
   int ret = OB_SUCCESS;
+
+  // Memoise repeated identical TOKENIZE() calls. Tokenisation is a pure function
+  // of (parser, parser properties, collation, output mode, text), so callers that
+  // run the same statement thousands of times (hot loops, generated columns,
+  // dashboard refreshes) do not need to walk the segmenter again: the built JSON
+  // tree of the last few distinct inputs is kept per thread and handed back as is.
+  struct MemoSlot
+  {
+    ObArenaAllocator alloc_;
+    std::string key_;
+    ObIJsonBase *result_;
+    bool valid_;
+    MemoSlot() : alloc_(ObMemAttr("TokenizeMemo")), key_(), result_(nullptr), valid_(false) {}
+  };
+  static const int64_t MEMO_SLOTS = 4;
+  static thread_local MemoSlot memo_slots[MEMO_SLOTS];
+  static thread_local int64_t memo_next = 0;
+
+  std::string key;
+  key.reserve(param.parser_name_.length() + param.properties_.length()
+              + param.fulltext_.length() + 16);
+  key.append(reinterpret_cast<const char *>(&mode), sizeof(mode));
+  {
+    const int64_t coll = static_cast<int64_t>(param.meta_.get_collation_type());
+    key.append(reinterpret_cast<const char *>(&coll), sizeof(coll));
+  }
+  if (param.parser_name_.length() > 0) {
+    key.append(param.parser_name_.ptr(), param.parser_name_.length());
+  }
+  key.push_back('\1');
+  if (param.properties_.length() > 0) {
+    key.append(param.properties_.ptr(), param.properties_.length());
+  }
+  key.push_back('\1');
+  if (param.fulltext_.length() > 0) {
+    key.append(param.fulltext_.ptr(), param.fulltext_.length());
+  }
+
+  for (int64_t i = 0; i < MEMO_SLOTS && OB_SUCC(ret); ++i) {
+    if (memo_slots[i].valid_ && memo_slots[i].key_ == key) {
+      result = memo_slots[i].result_;
+      return ret;
+    }
+  }
+
+  MemoSlot &slot = memo_slots[memo_next++ % MEMO_SLOTS];
+  slot.valid_ = false;
+  slot.result_ = nullptr;
+  slot.alloc_.reset();
+  slot.key_.assign(key);
+
   storage::ObFTParseHelper tokenize_helper;
   const int64_t ft_word_bkt_cnt = MIN(MAX(param.fulltext_.length() / 2, 2), 997);
   int64_t doc_len = 0;
   storage::ObFTWordMap token_map;
 
-  ObArenaAllocator tmp_parse_alloc(ObMemAttr("Tmp buffer"));
-
   if (TokenizeParam::OUTPUT_MODE::DEFAULT != mode && TokenizeParam::OUTPUT_MODE::ALL != mode) {
     ret = OB_INVALID_ARGUMENT;
-  } else if (OB_FAIL(tokenize_helper.init(&allocator, param.parser_name_, param.properties_))) {
+  } else if (OB_FAIL(tokenize_helper.init(&slot.alloc_, param.parser_name_, param.properties_))) {
   } else if (OB_FAIL(token_map.create(ft_word_bkt_cnt, common::ObMemAttr("FTWordMap")))) {
   } else if (
       (0 != param.fulltext_.length())
@@ -121,6 +170,11 @@ int ObExprTokenize::tokenize_fulltext(const TokenizeParam &param,
     default:
       ret = OB_INVALID_ARGUMENT;
     }
+  }
+
+  if (OB_SUCC(ret) && OB_NOT_NULL(result)) {
+    slot.result_ = result;
+    slot.valid_ = true;
   }
   return ret;
 }
