@@ -1806,6 +1806,7 @@ int ObLSTabletService::insert_rows(
 
   NG_TRACE(S_insert_rows_begin);
   int64_t afct_num = 0;
+  LOG_ERROR("DBG insH enter", K(dml_param.table_param_->get_data_table().get_table_id()), K(column_ids.count()));
   if (OB_UNLIKELY(!is_inited_)) {
     ret = OB_NOT_INIT;
   } else if (OB_UNLIKELY(!ctx.is_valid())
@@ -1823,6 +1824,7 @@ int ObLSTabletService::insert_rows(
     int64_t batch_idx = 0;
     ObDatumRow *rows = nullptr;
     if (OB_FAIL(prepare_dml_running_ctx(&column_ids, nullptr, tablet_handle, run_ctx))) {
+      LOG_ERROR("DBG ins2 prepare_ctx failed", K(ret), K(column_ids.count()), K(tablet_handle.is_valid()));
     } else {
       tablet_handle.reset();
       ObTabletHandle tmp_handle;
@@ -1840,6 +1842,7 @@ int ObLSTabletService::insert_rows(
             rows_info.reset();
             if (OB_FAIL(rows_info.init(
                 col_descs, relative_table, ctx, tmp_handle.get_obj()->get_rowkey_read_info()))) {
+              LOG_ERROR("DBG ins2 rows_info init failed", K(ret), K(col_descs.count()), K(row_count));
             }
           }
           if (OB_FAIL(ret)) {
@@ -1852,7 +1855,9 @@ int ObLSTabletService::insert_rows(
           }
           if (OB_FAIL(ret)) {
           } else if (OB_FAIL(rows_info.assign_rows(row_count, rows))) {
+            LOG_ERROR("DBG ins assign_rows failed", K(ret), K(row_count));
           } else if (OB_FAIL(insert_rows_to_tablet(tmp_handle, run_ctx, rows_info))) {
+            LOG_ERROR("DBG ins insert_rows_to_tablet failed", K(ret), K(row_count));
           } else {
             afct_num += row_count;
           }
@@ -1875,6 +1880,7 @@ int ObLSTabletService::insert_rows(
   if (OB_SUCC(ret)) {
     affected_rows = afct_num;
   }
+  LOG_ERROR("DBG insH exit", K(ret), K(afct_num));
   NG_TRACE(S_insert_rows_end);
 
   return ret;
@@ -1952,6 +1958,7 @@ int ObLSTabletService::insert_rows_with_fetch_dup(
     int64_t row_count = 0;
     ObDatumRow *rows = nullptr;
     if (OB_FAIL(prepare_dml_running_ctx(&column_ids, nullptr, tablet_handle, run_ctx))) {
+      LOG_ERROR("DBG ins2 prepare_ctx failed", K(ret), K(column_ids.count()), K(tablet_handle.is_valid()));
     } else {
       tablet_handle.reset();
       ObTabletHandle tmp_handle;
@@ -2457,6 +2464,7 @@ int ObLSTabletService::delete_rows(
     int64_t max_tmp_row_cnt = 0;
 
     if (OB_FAIL(prepare_dml_running_ctx(&column_ids, nullptr, tablet_handle, run_ctx))) {
+      LOG_ERROR("DBG ins2 prepare_ctx failed", K(ret), K(column_ids.count()), K(tablet_handle.is_valid()));
     } else {
       tablet_handle.reset();
       HEAP_VAR(ObRowsInfo, rows_info) {
@@ -2477,6 +2485,7 @@ int ObLSTabletService::delete_rows(
             rows_info.reset();
             if (OB_FAIL(rows_info.init(
                 col_descs, relative_table, ctx, tmp_handle.get_obj()->get_rowkey_read_info()))) {
+              LOG_ERROR("DBG ins2 rows_info init failed", K(ret), K(col_descs.count()), K(row_count));
             }
           }
           cur_time = ObClockGenerator::getClock();

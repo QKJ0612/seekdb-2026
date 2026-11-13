@@ -24,6 +24,7 @@
 #include "sql/privilege_check/ob_ai_model_priv_util.h"
 #include "share/ob_server_struct.h"
 #include "lib/worker.h"
+#include "rootserver/ob_server_thread_helper.h"
 
 namespace oceanbase
 {
@@ -43,6 +44,24 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObAiServiceGuard);
 };
 
+class ObAiColumnTaskWorker : public rootserver::ObServerThreadHelper
+{
+public:
+  ObAiColumnTaskWorker() : is_inited_(false), stop_flag_(false) {}
+  virtual ~ObAiColumnTaskWorker() {}
+  int init();
+  int start();
+  void stop_worker();
+  virtual void do_work() override;
+  virtual void deactivate() override {}
+  virtual int activate() override { return common::OB_SUCCESS; }
+private:
+  int do_one_round();
+  bool is_inited_;
+  volatile bool stop_flag_;
+  DISALLOW_COPY_AND_ASSIGN(ObAiColumnTaskWorker);
+};
+
 class ObAiService
 {
 public:
@@ -50,14 +69,15 @@ public:
   virtual ~ObAiService();
   static int server_module_init(ObAiService* &ai_service);
   int init();
-  int start() { return OB_SUCCESS; }
-  void stop() {};
-  void wait() {};
+  int start();
+  void stop();
+  void wait();
   void destroy();
 public:
   int get_ai_service_guard(ObAiServiceGuard &ai_service_guard);
 private:
   bool is_inited_;
+  ObAiColumnTaskWorker ai_column_worker_;
   DISALLOW_COPY_AND_ASSIGN(ObAiService);
 };
 

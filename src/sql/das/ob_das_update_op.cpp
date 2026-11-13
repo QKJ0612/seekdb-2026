@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_DAS
 #include "sql/das/ob_das_update_op.h"
+#include "sql/das/ob_das_ai_column_task.h"
 #include "data_plane/blocksstable/ob_datum_row_factory.h"
 #include "data_plane/ob_i_dml_service.h"
 #include "share/rc/ob_server_runtime.h"
@@ -451,6 +452,14 @@ int ObDASUpdateOp::open_op()
     }
   } else {
     affected_rows_ = affected_rows;
+    if (affected_rows > 0) {
+      int tmp_ret = OB_SUCCESS;
+      if (OB_SUCCESS != (tmp_ret = create_ai_column_tasks_for_update(
+              upd_ctdef_->table_param_.get_data_table().get_table_id(),
+              *upd_ctdef_, write_buffer_, trans_desc_, snapshot_, op_alloc_))) {
+        LOG_WARN("create ai column tasks for update failed", K(tmp_ret));
+      }
+    }
   }
   return ret;
 }

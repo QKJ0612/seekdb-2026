@@ -988,6 +988,8 @@ int ObAccessService::insert_rows(
       || OB_UNLIKELY(column_ids.count() <= 0)
       || OB_ISNULL(row_iter)) {
     ret = OB_INVALID_ARGUMENT;
+    LOG_ERROR("DBG ins invalid arg", K(ret), K(tablet_id), K(tx_desc.is_valid()), K(dml_param.is_valid()),
+              K(column_ids.count()));
   } else if (OB_FAIL(check_write_allowed_(tablet_id,
                                           ObStoreAccessType::MODIFY,
                                           dml_param,
@@ -995,6 +997,7 @@ int ObAccessService::insert_rows(
                                           tx_desc,
                                           tablet_handle,
                                           *dml_param.store_ctx_guard_))) {
+    LOG_ERROR("DBG ins check_write_allowed failed", K(ret), K(tablet_id));
   } else if (OB_ISNULL(tablet_service = dml_param.store_ctx_guard_->get_ls()->get_tablet_svr())) {
     ret = OB_ERR_UNEXPECTED;
     LOG_ERROR("tablet service should not be null.", K(ret));
@@ -1005,6 +1008,7 @@ int ObAccessService::insert_rows(
                                       column_ids,
                                       row_iter,
                                       affected_rows);
+    LOG_ERROR("DBG ins tablet insert ret", K(ret), K(affected_rows), K(tablet_id));
   }
   return ret;
 }

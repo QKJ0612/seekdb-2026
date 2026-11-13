@@ -2060,6 +2060,49 @@ int ai_option_int_value(const ParseNode *node, int64_t &value)
 }
 }  // namespace
 
+namespace {
+int collect_ai_deps(const ParseNode *node,
+                    const ObIArray<ObString> &ai_names,
+                    ObSqlString &deps)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(node)) {
+  } else if (T_LINK_NODE == node->type_ || T_EXPR_LIST == node->type_
+             || T_FUN_SYS == node->type_ || T_FUN_SYS_PART_HASH == node->type_) {
+    int64_t start = (T_FUN_SYS == node->type_ || T_FUN_SYS_PART_HASH == node->type_) ? 1 : 0;
+    for (int64_t i = start; OB_SUCC(ret) && i < node->num_child_; ++i) {
+      ret = collect_ai_deps(node->children_[i], ai_names, deps);
+    }
+  } else if (T_IDENT == node->type_ || T_COLUMN_REF == node->type_) {
+    const char *nm = node->str_value_;
+    int64_t nm_len = node->str_len_;
+    if (NULL == nm) {
+      for (int64_t i = 0; i < node->num_child_; ++i) {
+        if (OB_NOT_NULL(node->children_[i]) && T_IDENT == node->children_[i]->type_) {
+          nm = node->children_[i]->str_value_;
+          nm_len = node->children_[i]->str_len_;
+        }
+      }
+    }
+    bool is_ai = false;
+    if (OB_NOT_NULL(nm)) {
+      for (int64_t i = 0; !is_ai && i < ai_names.count(); ++i) {
+        if (ai_names.at(i).length() == nm_len
+            && 0 == strncasecmp(ai_names.at(i).ptr(), nm, nm_len)) {
+          is_ai = true;
+        }
+      }
+      if (!is_ai) {
+        if (deps.length() > 0 && OB_FAIL(deps.append(","))) {
+        } else if (OB_FAIL(deps.append(nm, static_cast<int64_t>(nm_len)))) {
+        }
+      }
+    }
+  }
+  return ret;
+}
+}  // namespace
+
 int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
                                               const ParseNode *attr_node)
 {
@@ -2102,10 +2145,9 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
     }
   }
   if (OB_SUCC(ret)) {
-    if (ob_is_json_tc(column.get_data_type())) {
-    } else if (ob_is_collection_sql_type(column.get_data_type())) {
-    } else {
-      ret = OB_NOT_SUPPORTED;
+    // AI columns may be json, vector or scalar result types (worker spec uses bigint)
+    if (ob_is_json_tc(column.get_data_type()) || ob_is_collection_sql_type(column.get_data_type())) {
+      // ok
     }
   }
   // options
@@ -2208,6 +2250,16 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
   if (OB_SUCC(ret)) {
     if (ob_is_json_tc(column.get_data_type())
                && OB_FAIL(norm.append(" Return exactly one valid JSON value"))) {
+    }
+  }
+  // dependency columns used for update invalidation
+  if (OB_SUCC(ret)) {
+    ObSqlString dep_str;
+    if (OB_FAIL(collect_ai_deps(expr_node, ai_names, dep_str))) {
+      SQL_RESV_LOG(WARN, "collect ai deps failed", K(ret));
+    } else if (dep_str.length() > 0
+               && OB_FAIL(ob_write_string(*allocator_, dep_str.string(), def.deps_))) {
+      SQL_RESV_LOG(WARN, "write ai deps failed", K(ret));
     }
   }
   // record

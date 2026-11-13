@@ -16,6 +16,7 @@ struct ObAiColumnDef
   common::ObString model_name_;
   common::ObString normalized_expr_;
   int64_t max_retries_;
+  common::ObString deps_;
   ObAiColumnDef() : max_retries_(0) {}
   void reset()
   {

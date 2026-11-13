@@ -2473,6 +2473,33 @@ all_ai_column_def = dict(
 )
 def_table_schema(**all_ai_column_def)
 
+all_ai_column_task_def = dict(
+    owner = 'qkj',
+    table_name = '__all_ai_column_task',
+    table_id = '1132',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+      ('table_id', 'int'),
+      ('column_id', 'int'),
+      ('rowkey_text', 'varchar:128')
+    ],
+
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    normal_columns = [
+        ('request_id', 'varchar:128', 'true'),
+        ('rowkey_predicate', 'varchar:128', 'true'),
+        ('state', 'int', 'false', '0'),
+        ('retry_count', 'int', 'false', '0'),
+        ('eligible_ts', 'timestamp', 'true')
+    ]
+)
+
+def_table_schema(**all_ai_column_task_def)
+
+
+
 
 all_objauth_mysql_def = dict(
     owner = 'cjl476581',

@@ -107,8 +107,15 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
 
   if (OB_SUCC(ret)) {
     // Parse cascading update columns
-    if (OB_FAIL(resolve_additional_assignments(tables_assign,
-                                               T_UPDATE_SCOPE))) {
+    // NOTE: the ai column invalidation assignment (ai column := NULL) must be added
+    // BEFORE resolve_additional_assignments(). Otherwise the vector index cascade
+    // (which generates the hidden vector column assignments and thus the VSAG delta
+    // rows) never sees the ai column assignment, so the stale vector is not removed
+    // from the vector index when the ai column is invalidated.
+    if (OB_FAIL(add_ai_column_invalidation_assignments(tables_assign))) {
+      LOG_WARN("add ai column invalidation assignments failed", K(ret));
+    } else if (OB_FAIL(resolve_additional_assignments(tables_assign,
+                                                      T_UPDATE_SCOPE))) {
     }
   }
 
@@ -280,6 +287,137 @@ int ObUpdateResolver::check_join_update_conflict()
   } else if (is_join_update && update_stmt->has_limit()) {
     // Incorrect usage of UPDATE and LIMIT
     ret = OB_ERR_UPDATE_LIMIT;
+  }
+  return ret;
+}
+
+
+namespace {
+bool ai_deps_contains(const ObString &deps, const ObString &name)
+{
+  bool found = false;
+  const char *p = deps.ptr();
+  const int64_t len = deps.length();
+  int64_t start = 0;
+  for (int64_t i = 0; !found && i <= len; ++i) {
+    if (i == len || ',' == p[i]) {
+      const int64_t n = i - start;
+      if (n > 0 && n == static_cast<int64_t>(name.length())
+          && 0 == strncasecmp(p + start, name.ptr(), n)) {
+        found = true;
+      }
+      start = i + 1;
+    }
+  }
+  return found;
+}
+const char *const AI_RESULT_SPEC_SUFFIX = "__ai_result_spec";
+}  // namespace
+
+int ObUpdateResolver::add_ai_column_invalidation_assignments(
+    common::ObIArray<ObTableAssignment> &tables_assign)
+{
+  int ret = OB_SUCCESS;
+  ObDMLStmt *stmt = get_stmt();
+  if (OB_ISNULL(stmt) || OB_ISNULL(schema_checker_) || OB_ISNULL(params_.expr_factory_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("resolver not inited", K(ret));
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < tables_assign.count(); ++i) {
+    ObTableAssignment &ta = tables_assign.at(i);
+    const TableItem *table_item = stmt->get_table_item_by_id(ta.table_id_);
+    const ObTableSchema *table_schema = NULL;
+    if (OB_ISNULL(table_item) || !table_item->is_basic_table()) {
+      // not a base table: no ai columns
+    } else if (OB_FAIL(schema_checker_->get_table_schema(table_item->ref_id_, table_schema))) {
+      LOG_WARN("get table schema failed", K(ret));
+    } else if (OB_ISNULL(table_schema)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      for (ObTableSchema::const_column_iterator iter = table_schema->column_begin();
+           OB_SUCC(ret) && iter != table_schema->column_end(); ++iter) {
+        const ObColumnSchemaV2 *hidden = *iter;
+        if (OB_ISNULL(hidden) || !hidden->is_hidden()) {
+          continue;
+        }
+        const ObString hname = hidden->get_column_name_str();
+        const int64_t suffix_len = static_cast<int64_t>(strlen(AI_RESULT_SPEC_SUFFIX));
+        if (hname.length() <= suffix_len
+            || 0 != strncmp(hname.ptr() + hname.length() - suffix_len,
+                            AI_RESULT_SPEC_SUFFIX, suffix_len)) {
+          continue;
+        }
+        const ObString deps = hidden->get_comment_str();
+        if (deps.empty()) {
+          continue;
+        }
+        const ObString base_name(hname.length() - suffix_len, hname.ptr());
+        bool touched = false;
+        for (int64_t a = 0; !touched && a < ta.assignments_.count(); ++a) {
+          const ObColumnRefRawExpr *col_expr = ta.assignments_.at(a).column_expr_;
+          if (OB_NOT_NULL(col_expr) && ai_deps_contains(deps, col_expr->get_column_name())) {
+            touched = true;
+          }
+        }
+        // changing a primary-key column moves the row to a new rowkey: the cached
+        // ai result no longer belongs to the row, so invalidate it as well.
+        for (int64_t a = 0; !touched && a < ta.assignments_.count(); ++a) {
+          const ObColumnRefRawExpr *pk_expr = ta.assignments_.at(a).column_expr_;
+          const ObColumnSchemaV2 *pk_col = NULL;
+          if (OB_NOT_NULL(pk_expr)) {
+            pk_col = table_schema->get_column_schema(pk_expr->get_column_id());
+          }
+          if (OB_NOT_NULL(pk_col) && pk_col->is_rowkey_column()) {
+            touched = true;
+          }
+        }
+        if (!touched) {
+          continue;
+        }
+        // locate the ai result column schema by name
+        const ObColumnSchemaV2 *ai_col = NULL;
+        for (ObTableSchema::const_column_iterator it2 = table_schema->column_begin();
+             NULL == ai_col && it2 != table_schema->column_end(); ++it2) {
+          if (OB_NOT_NULL(*it2) && (*it2)->get_column_name_str() == base_name) {
+            ai_col = *it2;
+          }
+        }
+        if (OB_ISNULL(ai_col)) {
+          continue;
+        }
+        ObAssignment assignment;
+        ObSEArray<ObColumnRefRawExpr *, 1> col_exprs;
+        ColumnItem *col_item = NULL;
+        ObConstRawExpr *null_expr = NULL;
+        if (OB_FAIL(add_column_to_stmt(*table_item, *ai_col, col_exprs))) {
+          LOG_WARN("add column to stmt failed", K(ret));
+        } else if (OB_ISNULL(col_item = stmt->get_column_item_by_id(
+                       table_item->table_id_, ai_col->get_column_id()))) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(ObRawExprUtils::build_const_obj_expr(
+                       *params_.expr_factory_, ObObj(), null_expr))) {
+          LOG_WARN("build const null expr failed", K(ret));
+        } else if (OB_ISNULL(null_expr)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else {
+          ObRawExpr *conv_expr = reinterpret_cast<ObRawExpr *>(null_expr);
+          if (OB_FAIL(ObRawExprUtils::build_column_conv_expr(*params_.expr_factory_,
+                                                            *params_.allocator_,
+                                                            *col_item->get_expr(),
+                                                            conv_expr,
+                                                            session_info_))) {
+            LOG_WARN("build column conv expr failed", K(ret));
+          } else {
+            assignment.column_expr_ = col_item->expr_;
+            assignment.expr_ = conv_expr;
+            assignment.is_implicit_ = true;
+            if (OB_FAIL(add_assignment(tables_assign, table_item, col_item, assignment))) {
+              LOG_WARN("add assignment failed", K(ret));
+            }
+          }
+        }
+      }
+    }
   }
   return ret;
 }

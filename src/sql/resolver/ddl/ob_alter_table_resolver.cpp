@@ -3478,6 +3478,9 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
               hidden_col.set_nullable(true);
               hidden_col.set_is_hidden(true);
               hidden_col.set_charset_type(CHARSET_UTF8MB4);
+              if (OB_SUCC(ret) && 2 == k) {
+                ret = hidden_col.set_comment(ai_def.deps_);
+              }
               if (OB_FAIL(hidden_name.append_fmt("%.*s%s", ai_def.column_name_.length(),
                                                  ai_def.column_name_.ptr(), suffixes[k]))) {
               } else if (OB_FAIL(hidden_col.set_column_name(hidden_name.ptr()))) {

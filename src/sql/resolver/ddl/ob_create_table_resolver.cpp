@@ -905,6 +905,9 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
             ai_hidden_column.set_data_type(ObVarcharType);
             ai_hidden_column.set_data_length(4096);
             ai_hidden_column.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+            if (OB_SUCC(ret) && 2 == si) {
+              ret = ai_hidden_column.set_comment(ai_def.deps_);
+            }
             if (OB_FAIL(ai_hidden_column.set_column_name(hidden_name))) {
             } else if (OB_FAIL(resolved_cols.push_back(ai_hidden_column))) {
             }

@@ -87,12 +87,14 @@ int ObDMLRunningCtx::init(
   }
 
   if (OB_FAIL(ret)) {
-    // do nothing
+    LOG_ERROR("DBG run_ctx check schema failed", K(ret));
   } else if (OB_FAIL(prepare_relative_table(
       dml_param_.table_param_->get_data_table(),
       tablet_handle,
       store_ctx_.mvcc_acc_ctx_.get_snapshot_version()))) {
+    LOG_ERROR("DBG run_ctx prepare_relative_table failed", K(ret));
   } else if (NULL != column_ids && OB_FAIL(prepare_column_info(*column_ids))) {
+    LOG_ERROR("DBG run_ctx prepare_column_info failed", K(ret), K(column_ids->count()));
   } else if (is_need_check_old_row_ && OB_FAIL(check_need_old_row_legitimacy())) {
   } else if (is_need_check_old_row_ && OB_FAIL(init_cmp_funcs())) {
   } else {
