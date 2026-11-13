@@ -40,6 +40,7 @@ public:
 
   virtual int resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObStmt *&stmt);
   ObResolverParams &get_params() { return params_; }
+  int resolve_describe_query(const ParseNode &parse_tree, ObStmt *&stmt);
 
 private:
   template <typename ResolverType>

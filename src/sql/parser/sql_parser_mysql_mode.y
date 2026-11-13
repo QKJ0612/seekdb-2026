@@ -244,6 +244,7 @@ END_P SET_VAR DELIMITER
         ON OPTIMIZE /*OPTIMIZER_COSTS*/ OPTION OPTIONALLY OR ORDER OUT OUTER OUTFILE
         PARTITION PRECISION PRIMARY PROCEDURE PURGE
         RANGE READ READS READ_WRITE REAL REFERENCES REGEXP RELEASE RENAME REPEAT REPLACE REQUIRE
+        READ_CSV READ_JSON READ_PARQUET GLOB
         RESIGNAL RESTRICT RETURN REVOKE RIGHT RLIKE
         SCHEMA SCHEMAS SECOND_MICROSECOND SELECT SENSITIVE SEPARATOR SET SHOW SIGNAL SMALLINT SPATIAL
         SPECIFIC SQL SQLEXCEPTION SQLSTATE SQLWARNING SQL_BIG_RESULT SQL_CALC_FOUND_ROWS
@@ -271,7 +272,7 @@ END_P SET_VAR DELIMITER
 
         CACHE CALIBRATION CALIBRATION_INFO CALC_PARTITION_ID CANCEL CASCADED CAST CATALOG_NAME CHAIN CHANGED CHARSET CHECKSUM CHECKPOINT CHUNK CIPHER CLIENT
         CLASS_ORIGIN CLEAN CLEAR CLOG CLOSE COALESCE COLUMN_STAT
-        CODE COLLATION COLUMN_FORMAT COLUMN_NAME COLUMNS COMMENT COMMIT COMMITTED COMPACT COMPLETE COPY
+        CODE COLLATION COLUMN_FORMAT COLUMN_NAME COLUMNS COMMENT COMMIT COMMITTED COMPACT COMPLETE COPY HEADER NULLSTR
         COMPRESSED COMPRESSION COMPRESSION_CODE COMPUTATION CONCURRENT CONDENSED CONDITIONAL CONNECTION CONSISTENT CONSISTENT_MODE CONSTRAINT_CATALOG
         CONSTRAINT_NAME CONSTRAINT_SCHEMA CONTAINS CONTRIBUTORS COSINE COUNT CPU CREATE_TIMESTAMP
         CTXCAT CTX_ID CUBE CURDATE CURRENT STACKED CURTIME CURSOR_NAME CUME_DIST CYCLE CONNECT
@@ -454,7 +455,7 @@ END_P SET_VAR DELIMITER
 %type <reserved_keyword> mysql_reserved_keyword
 %type <ival> consistency_level use_plan_cache_type
 %type <node> set_type
-%type <node> drop_index_stmt hint_options opt_expr_as_list expr_as_list expr_with_opt_alias substr_params opt_comma substr_or_substring
+%type <node> drop_index_stmt hint_options opt_expr_as_list expr_as_list expr_with_opt_alias substr_params opt_comma substr_or_substring table_function_expr table_func_name
 %type <node> /*frozen_type*/ opt_binary
 %type <node> create_view_stmt view_name opt_column_list opt_tablet_id view_select_stmt opt_check_option opt_algorithm view_algorithm opt_definer opt_sql_security
 %type <node> name_list
@@ -468,6 +469,7 @@ END_P SET_VAR DELIMITER
 %type <node> lock_tables_stmt unlock_tables_stmt lock_type lock_table_list lock_table opt_local
 %type <node> recyclebin_restore_stmt purge_stmt opt_recyclebin_restore_rename_table opt_recyclebin_restore_rename_database
 %type <node> cache_type
+%type <node> copy_stmt copy_option_list copy_option
 %type <node> into_opt into_clause field_opt field_term field_term_list line_opt line_term line_term_list into_var_list into_var file_opt file_option_list file_option file_size_const binary_format
 %type <node> string_list text_string string_val_list
 %type <node> list_expr list_partition_element list_partition_expr list_partition_list list_partition_option opt_list_partition_list opt_list_subpartition_list list_subpartition_list list_subpartition_element drop_partition_name_list
@@ -556,6 +558,7 @@ opt_end_p:
 /* only preparable statement will set question mark size */
 stmt:
     select_stmt             { $$ = $1; question_mark_issue($$, result); }
+  | copy_stmt              { $$ = $1; question_mark_issue($$, result); }
   | insert_stmt             { $$ = $1; question_mark_issue($$, result); }
   | create_table_stmt       {
     $$ = $1;
@@ -8928,6 +8931,81 @@ INTO OUTFILE STRING_VALUE opt_charset field_opt line_opt file_opt
 }
 ;
 
+
+copy_stmt:
+COPY select_with_parens TO STRING_VALUE '(' copy_option_list ')'
+{
+  ParseNode *select_node = $2;
+  if (NULL != select_node) {
+    if (NULL != select_node->children_[PARSE_SELECT_INTO]) {
+      yyerror(&@2, result, "cannot use into with copy statement");
+      YYERROR;
+    } else {
+      ParseNode *format_list = NULL;
+      ParseNode *comma_node = NULL;
+      ParseNode *term_node = NULL;
+      ParseNode *opt_link = NULL;
+      malloc_terminal_node(comma_node, result->malloc_pool_, T_VARCHAR);
+      comma_node->str_value_ = (char*)",";
+      comma_node->str_len_ = 1;
+      malloc_non_terminal_node(term_node, result->malloc_pool_, T_FIELD_TERMINATED_STR, 1, comma_node);
+      malloc_non_terminal_node(opt_link, result->malloc_pool_, T_LINK_NODE, 2, term_node, $6);
+      merge_nodes(format_list, result, T_EXTERNAL_FILE_FORMAT, opt_link);
+      ParseNode *path_node = NULL;
+      malloc_terminal_node(path_node, result->malloc_pool_, T_VARCHAR);
+      path_node->str_value_ = $4->str_value_;
+      path_node->str_len_ = $4->str_len_;
+      malloc_non_terminal_node(select_node->children_[PARSE_SELECT_INTO],
+                               result->malloc_pool_, T_INTO_OUTFILE, 3, path_node, format_list, NULL);
+      $$ = select_node;
+    }
+  } else {
+    $$ = NULL;
+  }
+}
+;
+
+copy_option_list:
+copy_option
+{
+  $$ = $1;
+}
+| copy_option_list opt_comma copy_option
+{
+  (void)($2);
+  if (NULL == $3) {
+    $$ = $1;
+  } else if (NULL == $1) {
+    $$ = $3;
+  } else {
+    malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+  }
+}
+;
+
+copy_option:
+FORMAT STRING_VALUE
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXTERNAL_FILE_FORMAT_TYPE, 1, $2);
+}
+| FORMAT NAME_OB
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXTERNAL_FILE_FORMAT_TYPE, 1, $2);
+}
+| HEADER
+{
+  ParseNode *bool_node = NULL;
+  malloc_terminal_node(bool_node, result->malloc_pool_, T_BOOL);
+  bool_node->value_ = 1;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_PARSE_HEADER, 1, bool_node);
+}
+| NULLSTR STRING_VALUE
+{
+  (void)($2);
+  $$ = NULL;
+}
+;
+
 into_opt:
 %prec LOWER_INTO
 {
@@ -10848,6 +10926,44 @@ tbl_name
 {
   $$ = $1;
 }
+| table_function_expr
+{
+  $$ = $1;
+}
+;
+
+table_function_expr:
+table_func_name '(' expr_list ')'
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_TABLE_FUNCTION_EXPRESSION, 3, $1, $3, NULL);
+}
+| table_func_name '(' expr_list ')' relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_TABLE_FUNCTION_EXPRESSION, 3, $1, $3, $5);
+}
+| table_func_name '(' expr_list ')' AS relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_TABLE_FUNCTION_EXPRESSION, 3, $1, $3, $6);
+}
+;
+
+table_func_name:
+READ_CSV
+{
+  make_name_node($$, result->malloc_pool_, "read_csv");
+}
+| READ_JSON
+{
+  make_name_node($$, result->malloc_pool_, "read_json");
+}
+| READ_PARQUET
+{
+  make_name_node($$, result->malloc_pool_, "read_parquet");
+}
+| GLOB
+{
+  make_name_node($$, result->malloc_pool_, "glob");
+}
 ;
 
 tbl_name:
@@ -12265,7 +12381,7 @@ explain_or_desc relation_factor opt_desc_column_option
   malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_COLUMNS, 4, $$, $2, NULL, $3);
 }
 
-| explain_or_desc explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, 0, $2, NULL, NULL);}
+| explain_or_desc explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, 0, $2, $1, NULL);}
 | explain_or_desc PRETTY explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, T_PRETTY, $3, NULL, NULL);}
 | explain_or_desc PRETTY_COLOR explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, T_PRETTY_COLOR, $3, NULL, NULL);}
 
@@ -12306,8 +12422,8 @@ explain_or_desc relation_factor opt_desc_column_option
 
 explain_or_desc:
 EXPLAIN {$$ = NULL;}
-| DESCRIBE {$$ = NULL;}
-| DESC  {$$ = NULL;}
+| DESCRIBE { malloc_terminal_node($$, result->malloc_pool_, T_BOOL); $$->value_ = 1; }
+| DESC  { malloc_terminal_node($$, result->malloc_pool_, T_BOOL); $$->value_ = 1; }
 ;
 
 explainable_stmt:
@@ -17698,6 +17814,8 @@ ACCOUNT
 |       FLUSH
 |       FOLLOWING
 |       FORMAT
+|       HEADER
+|       NULLSTR
 |       FROZEN
 |       FOUND
 |       FRAGMENTATION

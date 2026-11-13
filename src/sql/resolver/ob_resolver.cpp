@@ -16,6 +16,10 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/ob_resolver.h"
+#include "sql/parser/ob_parser.h"
+#include "lib/string/ob_sql_string.h"
+#include "sql/resolver/dml/ob_select_stmt.h"
+#include "sql/resolver/dml/ob_dml_stmt.h"
 #include "lib/utility/ob_smart_call.h"
 #include "lib/stat/ob_diagnostic_info_guard.h"
 #include "sql/resolver/cmd/ob_alter_system_resolver.h"
@@ -473,7 +477,14 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
         break;
       }
       case T_EXPLAIN: {
-        REGISTER_STMT_RESOLVER(Explain);
+        const ParseNode *desc_marker = parse_tree.num_child_ > 2 ? parse_tree.children_[2] : NULL;
+        if (OB_NOT_NULL(desc_marker) && T_BOOL == desc_marker->type_ && 1 == desc_marker->value_) {
+          if (OB_FAIL(resolve_describe_query(parse_tree, stmt))) {
+            LOG_WARN("resolve describe query failed", K(ret));
+          }
+        } else {
+          REGISTER_STMT_RESOLVER(Explain);
+        }
         break;
       }
       case T_ALTER_SYSTEM_SET: {
@@ -679,6 +690,112 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       }
     }
   }  // end if
+  return ret;
+}
+
+namespace {
+const char *describe_result_type_name(ObObjType type)
+{
+  switch (type) {
+    case ObTinyIntType: return "BOOLEAN";
+    case ObSmallIntType: return "SMALLINT";
+    case ObMediumIntType: return "INT";
+    case ObInt32Type: return "INT";
+    case ObIntType: return "BIGINT";
+    case ObFloatType: return "FLOAT";
+    case ObDoubleType: return "DOUBLE";
+    case ObVarcharType: return "VARCHAR";
+    case ObCharType: return "CHAR";
+    case ObDateType: return "DATE";
+    case ObDateTimeType: return "DATETIME";
+    case ObTimestampType: return "TIMESTAMP";
+    case ObNumberType: return "DECIMAL";
+    default: return ob_obj_type_str(type);
+  }
+}
+}  // namespace
+
+int ObResolver::resolve_describe_query(const ParseNode &parse_tree, ObStmt *&stmt)
+{
+  int ret = OB_SUCCESS;
+  const ParseNode *child = parse_tree.num_child_ > 4 ? parse_tree.children_[4] : NULL;
+  ObStmt *child_stmt = NULL;
+  if (OB_ISNULL(child)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("null describe child", K(ret));
+  } else if (T_SELECT != child->type_) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "DESCRIBE for this statement type");
+  } else {
+    ObResolver sel_resolver(params_);
+    if (OB_FAIL(sel_resolver.resolve(ObResolver::IS_NOT_PREPARED_STMT, *child, child_stmt))) {
+      LOG_WARN("resolve describe target failed", K(ret));
+    }
+  }
+  ObSelectStmt *sel_stmt = NULL;
+  if (OB_SUCC(ret)) {
+    sel_stmt = static_cast<ObSelectStmt *>(child_stmt);
+    if (OB_ISNULL(sel_stmt)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("describe target is not a select stmt", K(ret));
+    }
+  }
+  TableItem *file_ti = NULL;
+  if (OB_SUCC(ret)) {
+    const ObIArray<TableItem *> &tis = sel_stmt->get_table_items();
+    for (int64_t i = 0; OB_SUCC(ret) && i < tis.count(); ++i) {
+      TableItem *ti = tis.at(i);
+      if (OB_NOT_NULL(ti) && OB_NOT_NULL(ti->json_table_def_)
+          && MulModeTableType::OB_FILE_TABLE_TYPE == ti->json_table_def_->table_type_) {
+        file_ti = ti;
+        break;
+      }
+    }
+  }
+  ObSqlString text;
+  const int64_t n = OB_ISNULL(sel_stmt) ? 0 : sel_stmt->get_select_item_size();
+  if (OB_SUCC(ret) && 0 == n) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("describe target has no output column", K(ret));
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < n; ++i) {
+    const SelectItem &si = sel_stmt->get_select_item(i);
+    ObObjType col_type = ObNullType;
+    if (OB_NOT_NULL(si.expr_)) {
+      col_type = si.expr_->get_result_type().get_type();
+    }
+    const char *type_name = describe_result_type_name(col_type);
+    bool nullable = false;
+    if (OB_NOT_NULL(file_ti) && OB_NOT_NULL(file_ti->json_table_def_)
+        && i < file_ti->json_table_def_->all_cols_.count()) {
+      ObJtColBaseInfo *ci = file_ti->json_table_def_->all_cols_.at(i);
+      nullable = (NULL != ci && 0 != ci->allow_scalar_);
+    }
+    const char *sep = (0 == i) ? "" : " union all ";
+    OZ (text.append_fmt("%sselect '%.*s' as column_name, '%s' as column_type, '%s' as `null`, "
+                        "NULL as `key`, NULL as `default`, NULL as extra",
+                        sep, si.expr_name_.length(), si.expr_name_.ptr(), type_name,
+                        nullable ? "YES" : "NO"));
+  }
+  if (OB_SUCC(ret)) {
+    ObParser parser(*params_.allocator_, params_.session_info_->get_sql_mode(),
+                    params_.session_info_->get_charsets4parser());
+    ParseResult parse_result;
+    if (OB_FAIL(parser.parse(text.string(), parse_result))) {
+      LOG_WARN("parse describe result sql failed", K(ret));
+    } else if (OB_ISNULL(parse_result.result_tree_)
+               || parse_result.result_tree_->num_child_ < 1
+               || OB_ISNULL(parse_result.result_tree_->children_[0])) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("empty parse tree for describe result", K(ret));
+    } else {
+      ObResolver new_resolver(params_);
+      if (OB_FAIL(new_resolver.resolve(ObResolver::IS_NOT_PREPARED_STMT,
+                                       *parse_result.result_tree_->children_[0], stmt))) {
+        LOG_WARN("resolve describe result sql failed", K(ret));
+      }
+    }
+  }
   return ret;
 }
 

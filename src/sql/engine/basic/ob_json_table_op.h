@@ -28,6 +28,8 @@
 #include "sql/engine/expr/ob_expr.h"
 #include "sql/engine/expr/ob_json_param_type.h"
 #include "sql/engine/expr/ob_expr_json_utils.h"
+#include "sql/engine/basic/ob_file_table_scanner.h"
+#include "sql/engine/basic/ob_parquet_file.h"
 
 namespace oceanbase
 {
@@ -197,12 +199,31 @@ public:
       input_(nullptr),
       j_null_(),
       j_arr_(allocator_),
-      j_obj_(allocator_)
+      j_obj_(allocator_),
+      file_alloc_(),
+      file_row_alloc_(),
+      file_path_(),
+      file_content_(),
+      file_pos_(0),
+      file_skip_(0),
+      file_has_header_(1),
+      file_format_(0),
+      file_delim_(','),
+      file_quote_('"'),
+      file_escape_('\0'),
+      file_null_str_(),
+      file_names_(),
+      file_col_names_(),
+      file_name_pos_(0),
+      file_table_inited_(false),
+      pq_file_(),
+      pq_row_(0)
   {
     const ObJsonTableSpec* spec_ptr = reinterpret_cast<const ObJsonTableSpec*>(&spec);
     col_count_ = spec_ptr->column_exprs_.count();
   }
 
+  bool is_file_table() const { return MY_SPEC.table_type_ == MulModeTableType::OB_FILE_TABLE_TYPE; }
   virtual int inner_open() override;
   virtual int inner_rescan() override;
   virtual int switch_iterator() override;
@@ -228,6 +249,9 @@ private:
   int generate_table_exec_tree(ObIAllocator* allocator, const JtColTreeNode& orig_col,
                                JoinNode*& join_col);
   int inner_get_next_row_jt();  // json table function inner
+  int file_table_open();
+  int file_table_next_row();
+  int file_table_read_options();
 
 private:
   JtColTreeNode* def_root_;
@@ -246,6 +270,26 @@ private:
   ObJsonNull j_null_;
   ObJsonArray j_arr_;
   ObJsonObject j_obj_;
+  // file table state
+  common::ObArenaAllocator file_alloc_;
+  common::ObArenaAllocator file_row_alloc_;
+  ObString file_path_;
+  ObString file_content_;
+  int64_t file_pos_;
+  int64_t file_skip_;
+  int64_t file_has_header_;
+  int64_t file_format_;
+  char file_delim_;
+  char file_quote_;
+  char file_escape_;
+  ObString file_null_str_;
+  common::ObSEArray<ObString, 16> file_names_;
+  common::ObSEArray<ObString, 16> file_col_names_;
+  int64_t file_name_pos_;
+  bool file_table_inited_;
+  ObParquetFile pq_file_;
+  ObPQPageState pq_states_[ObParquetFile::MAX_COLS];
+  int64_t pq_row_;
 };
 
 class MulModeTableFunc {

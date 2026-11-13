@@ -2989,6 +2989,8 @@ int ObSelectResolver::resolve_into_file_node(const ParseNode *list_node, ObSelec
 int ObSelectResolver::resolve_into_outfile_with_format(const ParseNode *node, ObSelectIntoItem &into_item)
 {
   int ret = OB_SUCCESS;
+  if (NULL != node->children_[0] && NULL != node->children_[0]->str_value_) {
+  }
   bool has_format_type = false;
   bool has_cs_type = false;
   ObExternalFileFormat external_format;

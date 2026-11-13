@@ -58,6 +58,7 @@ public:
     : ObOpSpec(alloc, type),
       into_type_(T_INTO_OUTFILE),
       user_vars_(alloc),
+      header_names_(alloc),
       outfile_name_(),
       field_str_(),
       line_str_(),
@@ -77,6 +78,7 @@ public:
 
   ObItemType into_type_;
   common::ObFixedArray<common::ObString, common::ObIAllocator> user_vars_;
+  common::ObFixedArray<common::ObString, common::ObIAllocator> header_names_;
   common::ObObj outfile_name_;
   common::ObObj field_str_;
   common::ObObj line_str_;
@@ -102,6 +104,7 @@ public:
     : ObOperator(exec_ctx, spec, input),
       top_limit_cnt_(INT64_MAX),
       is_first_(true),
+      header_written_(false),
       field_str_(),
       line_str_(),
       cs_type_(CS_TYPE_INVALID),
@@ -266,6 +269,7 @@ private:
 private:
   int64_t top_limit_cnt_;
   bool is_first_;
+  bool header_written_;
   ObObj field_str_;
   ObObj line_str_;
   ObObj file_name_;

@@ -48,6 +48,14 @@ public:
   {
   }
   virtual ~ObLogSelectInto() {}
+  inline common::ObIArray<common::ObString> &get_header_names_for_update()
+  {
+    return header_names_;
+  }
+  inline const common::ObIArray<common::ObString> &get_header_names() const
+  {
+    return header_names_;
+  }
   inline void set_into_type(ObItemType &into_type)
   {
     into_type_ = into_type;
@@ -186,6 +194,7 @@ private:
   int64_t buffer_size_;
   common::ObObj escaped_cht_;
   common::ObCollationType cs_type_;
+  common::ObSEArray<common::ObString, 4> header_names_;
   bool is_overwrite_;
   common::ObString external_properties_;
 };

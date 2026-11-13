@@ -16,6 +16,8 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "ob_json_table_op.h"
+#include "sql/engine/basic/ob_parquet_file.h"
+#include "share/session/ob_local_session_var.h"
 #include "sql/engine/expr/ob_expr_multi_mode_func_helper.h"
 #include "sql/engine/expr/ob_expr_json_value.h"
 #include "sql/engine/expr/ob_expr_json_query.h"
@@ -581,10 +583,516 @@ int ObJsonTableOp::generate_column_trees(JtColTreeNode*& root)
   return ret;
 }
 
+namespace {
+
+int write_file_datum(ObExpr *expr, ObEvalCtx &ctx, ObIAllocator &alloc,
+                     const ObObjType type, const ObString &raw, const ObString &null_str)
+{
+  int ret = OB_SUCCESS;
+  ObDatum *datum = NULL;
+  ObObj obj;
+  bool is_null = false;
+  const ObString v = ObFileTableUtil::trim(raw);
+  if (null_str.length() > 0 && v.length() == null_str.length()
+      && 0 == ::memcmp(v.ptr(), null_str.ptr(), v.length())) {
+    is_null = true;
+  } else {
+    common::ObTimeConvertCtx cvrt_ctx(NULL, false);
+    if (OB_NOT_NULL(ctx.exec_ctx_.get_my_session())) {
+      const common::ObTimeZoneInfo *tz_info =
+          ctx.exec_ctx_.get_my_session()->get_tz_info_wrap().get_time_zone_info();
+      common::ObTimeConvertCtx tmp_ctx(tz_info, false);
+      cvrt_ctx = tmp_ctx;
+    }
+    if (OB_FAIL(ObFileTableUtil::convert_value(type, v, alloc, obj, is_null, &cvrt_ctx))) {
+    }
+  }
+  if (OB_SUCC(ret)) {
+    ObDatum &datum = expr->locate_datum_for_write(ctx);
+    if (is_null) {
+      datum.set_null();
+    } else {
+      datum.from_obj(obj, expr->obj_datum_map_);
+    }
+    expr->set_evaluated_projected(ctx);
+  }
+  return ret;
+}
+
+int cmp_obstring(const ObString &a, const ObString &b)
+{
+  const int64_t n = a.length() < b.length() ? a.length() : b.length();
+  int res = n > 0 ? ::memcmp(a.ptr(), b.ptr(), static_cast<size_t>(n)) : 0;
+  if (0 == res) {
+    res = (a.length() < b.length()) ? -1 : ((a.length() > b.length()) ? 1 : 0);
+  }
+  return res;
+}
+
+void json_skip_ws(const char *s, const int64_t len, int64_t &pos)
+{
+  while (pos < len && (' ' == s[pos] || '\t' == s[pos] || '\r' == s[pos] || '\n' == s[pos])) {
+    ++pos;
+  }
+}
+
+int json_parse_string(ObIAllocator &alloc, const char *s, const int64_t len,
+                      int64_t &pos, ObString &out)
+{
+  int ret = OB_SUCCESS;
+  if (pos >= len || '"' != s[pos]) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    ++pos;
+    char *buf = static_cast<char *>(alloc.alloc(len + 1));
+    int64_t n = 0;
+    if (OB_ISNULL(buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      while (pos < len) {
+        char c = s[pos++];
+        if ('"' == c) {
+          break;
+        }
+        if ('\\' == c && pos < len) {
+          c = s[pos++];
+          if ('n' == c) {
+            c = '\n';
+          } else if ('t' == c) {
+            c = '\t';
+          } else if ('r' == c) {
+            c = '\r';
+          } else if ('b' == c || 'f' == c) {
+            c = ' ';
+          } else if ('u' == c) {
+            pos += 4;
+            c = '?';
+          }
+        }
+        buf[n++] = c;
+      }
+      out.assign_ptr(buf, static_cast<int32_t>(n));
+    }
+  }
+  return ret;
+}
+
+int split_json_object_for_op(ObIAllocator &alloc, const ObString &line,
+                             ObIArray<ObString> &keys, ObIArray<ObString> &vals,
+                             ObIArray<int> &kinds)
+{
+  int ret = OB_SUCCESS;
+  const char *s = line.ptr();
+  const int64_t len = line.length();
+  int64_t pos = 0;
+  json_skip_ws(s, len, pos);
+  if (pos >= len || '{' != s[pos]) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    ++pos;
+  }
+  while (OB_SUCC(ret)) {
+    json_skip_ws(s, len, pos);
+    if (pos >= len) {
+      ret = OB_INVALID_ARGUMENT;
+      break;
+    }
+    if ('}' == s[pos]) {
+      break;
+    }
+    if (',' == s[pos]) {
+      ++pos;
+      continue;
+    }
+    ObString key;
+    if (OB_FAIL(json_parse_string(alloc, s, len, pos, key))) {
+      break;
+    }
+    json_skip_ws(s, len, pos);
+    if (pos >= len || ':' != s[pos]) {
+      ret = OB_INVALID_ARGUMENT;
+      break;
+    }
+    ++pos;
+    json_skip_ws(s, len, pos);
+    int kind = 5;
+    ObString val;
+    if (pos < len && '"' == s[pos]) {
+      kind = 0;
+      if (OB_FAIL(json_parse_string(alloc, s, len, pos, val))) {
+        break;
+      }
+    } else {
+      const int64_t start = pos;
+      while (pos < len && ',' != s[pos] && '}' != s[pos]) {
+        ++pos;
+      }
+      int64_t end = pos;
+      while (end > start && (' ' == s[end - 1] || '\t' == s[end - 1]
+                             || '\r' == s[end - 1] || '\n' == s[end - 1])) {
+        --end;
+      }
+      val.assign_ptr(const_cast<char *>(s + start), static_cast<int32_t>(end - start));
+      if (0 == val.case_compare("null")) {
+        kind = 4;
+      } else if (0 == val.case_compare("true") || 0 == val.case_compare("false")) {
+        kind = 3;
+      } else {
+        kind = 2;
+      }
+    }
+    if (OB_FAIL(keys.push_back(key)) || OB_FAIL(vals.push_back(val))
+        || OB_FAIL(kinds.push_back(kind))) {
+      break;
+    }
+  }
+  return ret;
+}
+
+} // anonymous namespace
+
+int ObJsonTableOp::file_table_read_options()
+{
+  int ret = OB_SUCCESS;
+  const ObJsonTableSpec &spec = MY_SPEC;
+  ObDatum *datum = NULL;
+  ObString path;
+  ObString delim;
+  ObString quote_s;
+  ObString escape_s;
+  ObString null_s;
+  int64_t skip = 0;
+  int64_t header = 1;
+  int64_t format = 0;
+  file_col_names_.reuse();
+  if (spec.value_exprs_.count() < 8) {
+    ret = OB_ERR_UNEXPECTED;
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < 8; ++i) {
+    ObExpr *expr = spec.value_exprs_.at(i);
+    if (OB_ISNULL(expr)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(expr->eval(eval_ctx_, datum))) {
+    } else if (OB_ISNULL(datum) || datum->is_null()) {
+    } else if (0 == i) {
+      path = datum->get_string();
+    } else if (1 == i) {
+      delim = datum->get_string();
+    } else if (2 == i) {
+      quote_s = datum->get_string();
+    } else if (3 == i) {
+      escape_s = datum->get_string();
+    } else if (4 == i) {
+      null_s = datum->get_string();
+    } else if (5 == i) {
+      skip = datum->get_int();
+    } else if (6 == i) {
+      header = datum->get_int();
+    } else {
+      format = datum->get_int();
+    }
+  }
+  for (int64_t i = 8; OB_SUCC(ret) && i < spec.value_exprs_.count(); ++i) {
+    ObExpr *expr = spec.value_exprs_.at(i);
+    if (OB_FAIL(expr->eval(eval_ctx_, datum))) {
+    } else if (OB_FAIL(file_col_names_.push_back(datum->get_string()))) {
+    }
+  }
+  if (OB_SUCC(ret)) {
+    file_delim_ = delim.length() > 0 ? delim[0] : ',';
+    file_quote_ = quote_s.length() > 0 ? quote_s[0] : '"';
+    file_escape_ = escape_s.length() > 0 ? escape_s[0] : '\0';
+    file_null_str_ = null_s;
+    file_skip_ = skip;
+    file_has_header_ = header;
+    file_format_ = format;
+    file_pos_ = 0;
+    file_name_pos_ = 0;
+    char *p = static_cast<char *>(file_alloc_.alloc(path.length() + 1));
+    if (OB_ISNULL(p)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      if (path.length() > 0) {
+        MEMCPY(p, path.ptr(), path.length());
+      }
+      p[path.length()] = '\0';
+      file_path_.assign_ptr(p, path.length());
+    }
+  }
+  return ret;
+}
+
+int ObJsonTableOp::file_table_open()
+{
+  int ret = OB_SUCCESS;
+  file_alloc_.reuse();
+  file_row_alloc_.reuse();
+  file_names_.reuse();
+  file_content_.reset();
+  file_pos_ = 0;
+  file_name_pos_ = 0;
+  file_table_inited_ = false;
+  {
+    sql::ObSQLSessionInfo *session = get_exec_ctx().get_my_session();
+    int64_t file_sql_enabled = 0;
+    if (OB_ISNULL(session)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(session->get_sys_variable(share::SYS_VAR_ENABLE_FILE_SQL, file_sql_enabled))) {
+      LOG_WARN("get enable_file_sql failed", K(ret));
+    } else if (0 == file_sql_enabled) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "file table function is disabled by enable_file_sql");
+    }
+  }
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(file_table_read_options())) {
+  } else if (3 == file_format_) {
+    int64_t slash = -1;
+    for (int64_t i = 0; i < file_path_.length(); ++i) {
+      if ('/' == file_path_[i]) {
+        slash = i;
+      }
+    }
+    ObString dir;
+    ObString pattern;
+    if (slash < 0) {
+      dir = ObString::make_string(".");
+      pattern = file_path_;
+    } else if (0 == slash) {
+      dir = ObString::make_string("/");
+      pattern.assign_ptr(file_path_.ptr() + 1, file_path_.length() - 1);
+    } else {
+      dir.assign_ptr(file_path_.ptr(), static_cast<int32_t>(slash));
+      pattern.assign_ptr(file_path_.ptr() + slash + 1,
+                         file_path_.length() - static_cast<int32_t>(slash) - 1);
+    }
+    if (OB_FAIL(ObFileTableUtil::list_dir(file_alloc_, dir, pattern, file_names_))) {
+      LOG_WARN("list dir failed", K(ret), K(dir), K(pattern));
+    } else {
+      for (int64_t i = 0; i < file_names_.count(); ++i) {
+        for (int64_t j = i + 1; j < file_names_.count(); ++j) {
+          if (cmp_obstring(file_names_.at(j), file_names_.at(i)) < 0) {
+            ObString tmp = file_names_.at(i);
+            file_names_.at(i) = file_names_.at(j);
+            file_names_.at(j) = tmp;
+          }
+        }
+      }
+    }
+  } else if (2 == file_format_) {
+    if (OB_FAIL(ObFileTableUtil::load_file(file_alloc_, file_path_, file_content_))) {
+      LOG_WARN("load file failed", K(ret), K(file_path_));
+    } else if (OB_FAIL(pq_file_.parse_footer(file_content_.ptr(), file_content_.length()))) {
+      LOG_WARN("parse parquet footer failed", K(ret));
+    } else {
+      pq_row_ = 0;
+      for (int64_t i = 0; OB_SUCC(ret) && i < pq_file_.col_count(); ++i) {
+        pq_states_[i].next_page_off_ = 0;
+        if (OB_FAIL(pq_file_.read_page(i, file_alloc_, pq_states_[i]))) {
+          LOG_WARN("parquet read page failed", K(ret), K(i));
+        }
+      }
+    }
+  } else if (OB_FAIL(ObFileTableUtil::load_file(file_alloc_, file_path_, file_content_))) {
+    LOG_WARN("load file failed", K(ret), K(file_path_));
+  } else {
+    ObSEArray<ObString, 32> fields;
+    bool has_record = false;
+    for (int64_t i = 0; OB_SUCC(ret) && i < file_skip_; ++i) {
+      fields.reuse();
+      if (OB_FAIL(ObFileTableUtil::next_record(file_content_.ptr(), file_content_.length(), file_pos_,
+                                               file_delim_, file_quote_, file_escape_,
+                                               file_alloc_, fields, has_record))) {
+      } else if (!has_record) {
+        break;
+      }
+    }
+    if (OB_SUCC(ret) && 0 == file_format_ && 0 != file_has_header_) {
+      fields.reuse();
+      if (OB_FAIL(ObFileTableUtil::next_record(file_content_.ptr(), file_content_.length(), file_pos_,
+                                               file_delim_, file_quote_, file_escape_,
+                                               file_alloc_, fields, has_record))) {
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    file_table_inited_ = true;
+  }
+  return ret;
+}
+
+int ObJsonTableOp::file_table_next_row()
+{
+  int ret = OB_SUCCESS;
+  const ObJsonTableSpec &spec = MY_SPEC;
+  clear_evaluated_flag();
+  file_row_alloc_.reuse();
+  if (!file_table_inited_ && OB_FAIL(file_table_open())) {
+  } else if (3 == file_format_) {
+    if (file_name_pos_ >= file_names_.count()) {
+      ret = OB_ITER_END;
+    } else if (col_count_ < 1) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      ObString nm = file_names_.at(file_name_pos_++);
+      if (OB_FAIL(write_file_datum(spec.column_exprs_.at(0), eval_ctx_, file_row_alloc_,
+                                   spec.column_exprs_.at(0)->obj_meta_.get_type(),
+                                   nm, ObString()))) {
+      }
+    }
+  } else if (2 == file_format_) {
+    if (pq_row_ >= pq_file_.num_rows()) {
+      ret = OB_ITER_END;
+    } else if (static_cast<int64_t>(col_count_) != pq_file_.col_count()) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < pq_file_.col_count(); ++i) {
+        ObExpr *expr = spec.column_exprs_.at(i);
+        ObPQPageState &st = pq_states_[i];
+        const ObPQColMeta &m = pq_file_.col(i);
+        if (st.rows_served_ >= st.rows_in_page_ && pq_row_ < pq_file_.num_rows()) {
+          if (OB_FAIL(pq_file_.read_page(i, file_alloc_, st))) {
+            LOG_WARN("parquet read next page failed", K(ret), K(i));
+          }
+        }
+        if (OB_SUCC(ret)) {
+          bool is_null = false;
+          if (1 == m.rep_ && st.def_len_ > 0) {
+            is_null = pq_def_level_is_null(st.def_buf_, st.def_len_, st.rows_served_);
+          }
+          ObDatum &datum = expr->locate_datum_for_write(eval_ctx_);
+          if (is_null) {
+            datum.set_null();
+          } else {
+            switch (m.type_) {
+              case 1: {  // INT32
+                int32_t v = 0;
+                MEMCPY(&v, st.val_buf_ + st.nonnull_served_ * 4, 4);
+                datum.set_int(v);
+                ++st.nonnull_served_;
+                break;
+              }
+              case 2: {  // INT64
+                int64_t v = 0;
+                MEMCPY(&v, st.val_buf_ + st.nonnull_served_ * 8, 8);
+                datum.set_int(v);
+                ++st.nonnull_served_;
+                break;
+              }
+              case 4: {  // FLOAT
+                float v = 0;
+                MEMCPY(&v, st.val_buf_ + st.nonnull_served_ * 4, 4);
+                datum.set_double(static_cast<double>(v));
+                ++st.nonnull_served_;
+                break;
+              }
+              case 5: {  // DOUBLE
+                double v = 0;
+                MEMCPY(&v, st.val_buf_ + st.nonnull_served_ * 8, 8);
+                datum.set_double(v);
+                ++st.nonnull_served_;
+                break;
+              }
+              case 0: {  // BOOLEAN (1 byte per value)
+                datum.set_int(st.val_buf_[st.nonnull_served_] ? 1 : 0);
+                ++st.nonnull_served_;
+                break;
+              }
+              case 6: {  // BYTE_ARRAY: u32 LE length + bytes
+                int32_t blen = 0;
+                MEMCPY(&blen, st.val_buf_ + st.val_pos_, 4);
+                ObString sv(blen, st.val_buf_ + st.val_pos_ + 4);
+                st.val_pos_ += 4 + blen;
+                datum.set_string(sv);
+                break;
+              }
+              default:
+                ret = OB_NOT_SUPPORTED;
+                break;
+            }
+          }
+          expr->set_evaluated_projected(eval_ctx_);
+          ++st.rows_served_;
+        }
+      }
+      if (OB_SUCC(ret)) {
+        ++pq_row_;
+      }
+    }
+  } else if (1 == file_format_) {
+    while (OB_SUCC(ret)) {
+      if (file_pos_ >= file_content_.length()) {
+        ret = OB_ITER_END;
+        break;
+      }
+      int64_t line_end = file_pos_;
+      while (line_end < file_content_.length() && '\n' != file_content_[line_end]) {
+        ++line_end;
+      }
+      ObString line(static_cast<int32_t>(line_end - file_pos_),
+                    const_cast<char *>(file_content_.ptr() + file_pos_));
+      file_pos_ = line_end + 1;
+      if (0 == ObFileTableUtil::trim(line).length()) {
+        continue;
+      }
+      ObSEArray<ObString, 32> keys;
+      ObSEArray<ObString, 32> vals;
+      ObSEArray<int, 32> kinds;
+      if (OB_FAIL(split_json_object_for_op(file_row_alloc_, line, keys, vals, kinds))) {
+        LOG_WARN("parse json line failed", K(ret), K(line));
+      } else {
+        for (int64_t i = 0; OB_SUCC(ret) && i < col_count_; ++i) {
+          ObExpr *expr = spec.column_exprs_.at(i);
+          const ObString col_name = i < file_col_names_.count() ? file_col_names_.at(i) : ObString();
+          ObString raw;
+          for (int64_t k = 0; k < keys.count(); ++k) {
+            if (0 == keys.at(k).case_compare(col_name)) {
+              raw = vals.at(k);
+              if (4 == kinds.at(k)) {
+                raw.reset();
+              }
+              break;
+            }
+          }
+          if (OB_FAIL(write_file_datum(expr, eval_ctx_, file_row_alloc_,
+                                       expr->obj_meta_.get_type(), raw, file_null_str_))) {
+          }
+        }
+        break;
+      }
+    }
+  } else {
+    ObSEArray<ObString, 32> fields;
+    bool has_record = false;
+    if (OB_FAIL(ObFileTableUtil::next_record(file_content_.ptr(), file_content_.length(), file_pos_,
+                                             file_delim_, file_quote_, file_escape_,
+                                             file_row_alloc_, fields, has_record))) {
+    } else if (!has_record) {
+      ret = OB_ITER_END;
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < col_count_; ++i) {
+        ObExpr *expr = spec.column_exprs_.at(i);
+        ObString raw;
+        if (i < fields.count()) {
+          raw = fields.at(i);
+        }
+        if (OB_FAIL(write_file_datum(expr, eval_ctx_, file_row_alloc_,
+                                     expr->obj_meta_.get_type(), raw, file_null_str_))) {
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 int ObJsonTableOp::inner_open()
 {
   INIT_SUCC(ret);
   if (OB_FAIL(init())) {
+  } else if (is_file_table()) {
+    if (OB_FAIL(file_table_open())) {
+      LOG_WARN("open file table failed", K(ret));
+    }
   } else if (MY_SPEC.value_exprs_.empty()) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(root_->open(&jt_ctx_))) {
@@ -601,6 +1109,10 @@ int ObJsonTableOp::inner_rescan()
   if (OB_FAIL(ObOperator::inner_rescan())) {
   } else {
     jt_ctx_.row_alloc_.reuse();
+  }
+  if (OB_SUCC(ret) && is_file_table()) {
+    if (OB_FAIL(file_table_open())) {
+    }
   }
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(reset_variable())) {
@@ -639,7 +1151,14 @@ int ObJsonTableOp::init()
   if (!is_inited_) {
     const ObJsonTableSpec* spec_ptr = reinterpret_cast<const ObJsonTableSpec*>(&spec_);
     jt_ctx_.spec_ptr_ = const_cast<ObJsonTableSpec*>(spec_ptr);
-    if (OB_FAIL(generate_table_exec_tree())) {
+    if (is_file_table()) {
+      is_inited_ = true;
+      jt_ctx_.spec_ptr_ = const_cast<ObJsonTableSpec *>(spec_ptr);
+      jt_ctx_.eval_ctx_ = &eval_ctx_;
+      jt_ctx_.exec_ctx_ = &get_exec_ctx();
+      jt_ctx_.op_exec_alloc_ = allocator_;
+      jt_ctx_.jt_op_ = this;
+    } else if (OB_FAIL(generate_table_exec_tree())) {
     } else {
       const sql::ObSQLSessionInfo *session = get_exec_ctx().get_my_session();
       if (OB_ISNULL(session)) {
@@ -694,6 +1213,8 @@ int ObJsonTableOp::inner_close()
     def_root_->destroy();
   }
   jt_ctx_.row_alloc_.clear();
+  file_alloc_.clear();
+  file_row_alloc_.clear();
   if (OB_NOT_NULL(jt_ctx_.table_func_) && OB_NOT_NULL(jt_ctx_.op_exec_alloc_)) {
     jt_ctx_.op_exec_alloc_->free(jt_ctx_.table_func_);
   }
@@ -1402,6 +1923,10 @@ int ObJsonTableOp::inner_get_next_row()
 {
   INIT_SUCC(ret);
   bool is_root_null = false;
+  if (is_file_table()) {
+    ret = file_table_next_row();
+    return ret;
+  }
   if (!(jt_ctx_.is_json_table_func()
         || jt_ctx_.is_unnest_table_func())) {
     ret = OB_ERR_UNEXPECTED;
