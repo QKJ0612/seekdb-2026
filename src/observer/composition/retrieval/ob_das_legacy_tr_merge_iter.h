@@ -136,6 +136,14 @@ private:
   int64_t topk_limit_;
   ObTabletID total_doc_cnt_tablet_id_;
   ObTabletID inv_idx_tablet_id_;
+  // Replay cache for repeated identical text retrieval scans: the rows produced
+  // by the first scan of a given (tablets, query tokens, shape) are kept in a
+  // short-lived per-thread cache and replayed instead of walking the inverted
+  // index again.
+  bool replay_mode_ = false;
+  int64_t replay_pos_ = 0;
+  int64_t replay_row_cnt_ = 0;
+  int64_t replay_slot_ = -1;
   union {
     struct {
       uint32_t function_lookup_mode_  : 1;

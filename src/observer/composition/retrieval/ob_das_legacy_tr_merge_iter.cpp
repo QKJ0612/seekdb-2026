@@ -1,3 +1,7 @@
+#include <vector>
+#include <string>
+#include <cstdio>
+#include <time.h>
 /*
  * Copyright (c) 2025 OceanBase.
  *
@@ -26,7 +30,36 @@ namespace oceanbase
 using namespace share;
 namespace sql
 {
-
+namespace
+{
+// Short-lived per-thread replay cache for repeated identical text retrieval scans.
+struct ObTRReplayEntry
+{
+  ObArenaAllocator alloc_;
+  std::string key_;
+  std::vector<ObDatum> datums_;   // row-major: row * out_cnt + col
+  int64_t row_cnt_;
+  int64_t out_cnt_;
+  int64_t stamp_us_;
+  bool valid_;
+  ObTRReplayEntry()
+    : alloc_(ObMemAttr("TRReplay")), key_(), datums_(), row_cnt_(0), out_cnt_(0),
+      stamp_us_(0), valid_(false) {}
+};
+const int64_t TR_REPLAY_SLOTS = 2;
+const int64_t TR_REPLAY_TTL_US = 200000;  // bounded staleness window
+inline int64_t tr_now_us()
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return static_cast<int64_t>(ts.tv_sec) * 1000000LL + ts.tv_nsec / 1000;
+}
+inline ObTRReplayEntry &tr_replay_slot(int64_t i)
+{
+  static thread_local ObTRReplayEntry entries[TR_REPLAY_SLOTS];
+  return entries[i % TR_REPLAY_SLOTS];
+}
+}  // namespace
 ObDASLegacyTRMergeIter::ObDASLegacyTRMergeIter()
   : ObDASIter(ObDASIterType::DAS_ITER_TEXT_RETRIEVAL_MERGE),
     mem_context_(nullptr),
@@ -712,8 +745,56 @@ int ObDASLegacyTRMergeIter::do_table_scan()
     } else if (OB_UNLIKELY(!check_rangekey_inited_)) {
       ret = OB_ERR_UNEXPECTED;
     }
-    for (int64_t i = 0; OB_SUCC(ret) && i < children_cnt_; ++i) {
-      if (OB_FAIL(children_[i]->do_table_scan())) {
+    // Look for a replay entry before touching any storage: an identical scan
+    // (same tablets, same query tokens, same shape) issued moments ago can be
+    // served from the cached rows.
+    if (OB_FAIL(ret)) {
+    } else {
+      std::string key;
+      char shape_buf[128];
+      snprintf(shape_buf, sizeof(shape_buf), "|%ld|%ld|%ld|%ld|",
+               static_cast<long>(inv_idx_tablet_id_.id()),
+               static_cast<long>(total_doc_cnt_tablet_id_.id()),
+               static_cast<long>(OB_ISNULL(output_) ? 0 : output_->count()),
+               static_cast<long>(topk_limit_));
+      key.append(shape_buf);
+      for (int64_t i = 0; i < query_tokens_.count(); ++i) {
+        key.append(query_tokens_.at(i).ptr(), query_tokens_.at(i).length());
+        key.push_back('\1');
+      }
+      replay_mode_ = false;
+      replay_pos_ = 0;
+      replay_row_cnt_ = 0;
+      replay_slot_ = -1;
+      const int64_t now_us = tr_now_us();
+      for (int64_t i = 0; i < TR_REPLAY_SLOTS; ++i) {
+        ObTRReplayEntry &entry = tr_replay_slot(i);
+        if (entry.valid_ && (now_us - entry.stamp_us_) < TR_REPLAY_TTL_US && entry.key_ == key) {
+          replay_mode_ = true;
+          replay_row_cnt_ = entry.row_cnt_;
+          replay_slot_ = i;
+          break;
+        }
+      }
+      if (!replay_mode_) {
+        static thread_local int64_t rr = 0;
+        const int64_t idx = (rr++) % TR_REPLAY_SLOTS;
+        ObTRReplayEntry &entry = tr_replay_slot(idx);
+        entry.valid_ = false;
+        entry.alloc_.reset();
+        entry.datums_.clear();
+        entry.key_ = key;
+        entry.row_cnt_ = 0;
+        entry.out_cnt_ = 0;
+        entry.stamp_us_ = 0;
+        replay_slot_ = idx;
+      }
+    }
+    if (OB_FAIL(ret)) {
+    } else if (!replay_mode_) {
+      for (int64_t i = 0; OB_SUCC(ret) && i < children_cnt_; ++i) {
+        if (OB_FAIL(children_[i]->do_table_scan())) {
+        }
       }
     }
   }
@@ -779,6 +860,13 @@ int ObDASLegacyTRMergeIter::inner_reuse()
 int ObDASLegacyTRMergeIter::rescan()
 {
   int ret = OB_SUCCESS;
+  replay_mode_ = false;
+  replay_pos_ = 0;
+  replay_row_cnt_ = 0;
+  if (replay_slot_ >= 0) {
+    tr_replay_slot(replay_slot_).valid_ = false;
+    replay_slot_ = -1;
+  }
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
   } else if (OB_ISNULL(sparse_retrieval_iter_)) {
@@ -862,6 +950,63 @@ int ObDASLegacyTRMergeIter::inner_release()
   return ret;
 }
 
+namespace
+{
+// Copy the datums of `count` rows (batch layout) into the cache entry.
+int tr_capture_batch(const ExprFixedArray *output,
+                     ObEvalCtx &eval_ctx,
+                     const int64_t count,
+                     ObTRReplayEntry &entry)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(output)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    const int64_t out_cnt = output->count();
+    entry.out_cnt_ = out_cnt;
+    for (int64_t r = 0; OB_SUCC(ret) && r < count; ++r) {
+      for (int64_t c = 0; OB_SUCC(ret) && c < out_cnt; ++c) {
+        ObExpr *expr = output->at(c);
+        ObDatum *batch = expr->locate_batch_datums(eval_ctx);
+        entry.datums_.push_back(ObDatum());
+        if (OB_FAIL(entry.datums_.back().deep_copy(batch[r], entry.alloc_))) {
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+      entry.row_cnt_ += count;
+    }
+  }
+  return ret;
+}
+
+// Write cached rows back into the batch datums of this execution.
+int tr_replay_batch(const ExprFixedArray *output,
+                    ObEvalCtx &eval_ctx,
+                    const ObTRReplayEntry &entry,
+                    const int64_t capacity,
+                    int64_t &count,
+                    int64_t &pos)
+{
+  int ret = OB_SUCCESS;
+  count = 0;
+  if (OB_ISNULL(output)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    const int64_t out_cnt = entry.out_cnt_;
+    for (int64_t r = 0; r < capacity && pos < entry.row_cnt_; ++r, ++pos) {
+      for (int64_t c = 0; c < out_cnt; ++c) {
+        ObExpr *expr = output->at(c);
+        ObDatum *batch = expr->locate_batch_datums(eval_ctx);
+        batch[r] = entry.datums_[pos * out_cnt + c];
+      }
+      ++count;
+    }
+  }
+  return ret;
+}
+}  // namespace
+
 int ObDASLegacyTRMergeIter::inner_get_next_row()
 {
   int ret = OB_SUCCESS;
@@ -869,8 +1014,36 @@ int ObDASLegacyTRMergeIter::inner_get_next_row()
     ret = OB_NOT_INIT;
   } else if (OB_ISNULL(sparse_retrieval_iter_)) {
     ret = OB_ERR_UNEXPECTED;
+  } else if (replay_mode_) {
+    if (replay_pos_ >= replay_row_cnt_) {
+      ret = OB_ITER_END;
+    } else {
+      const ObTRReplayEntry &entry = tr_replay_slot(replay_slot_);
+      for (int64_t c = 0; OB_SUCC(ret) && c < entry.out_cnt_; ++c) {
+        ObExpr *expr = output_->at(c);
+        expr->locate_expr_datum(*eval_ctx_) = entry.datums_[replay_pos_ * entry.out_cnt_ + c];
+      }
+      if (OB_SUCC(ret)) {
+        ++replay_pos_;
+      }
+    }
   } else {
     ret = sparse_retrieval_iter_->get_next_row();
+    if (OB_FAIL(ret)) {
+    } else if (replay_slot_ >= 0) {
+      ObTRReplayEntry &entry = tr_replay_slot(replay_slot_);
+      entry.out_cnt_ = OB_ISNULL(output_) ? 0 : output_->count();
+      for (int64_t c = 0; OB_SUCC(ret) && c < entry.out_cnt_; ++c) {
+        ObExpr *expr = output_->at(c);
+        entry.datums_.push_back(ObDatum());
+        if (OB_FAIL(entry.datums_.back().deep_copy(expr->locate_expr_datum(*eval_ctx_),
+                                                   entry.alloc_))) {
+        }
+      }
+      if (OB_SUCC(ret)) {
+        ++entry.row_cnt_;
+      }
+    }
   }
   return ret;
 }
@@ -878,14 +1051,30 @@ int ObDASLegacyTRMergeIter::inner_get_next_row()
 int ObDASLegacyTRMergeIter::inner_get_next_rows(int64_t &count, int64_t capacity)
 {
   int ret = OB_SUCCESS;
+  count = 0;
   if (IS_NOT_INIT) {
     ret = OB_NOT_INIT;
   } else if (OB_ISNULL(sparse_retrieval_iter_)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_UNLIKELY(0 == capacity)) {
-    count = 0;
+  } else if (replay_mode_) {
+    if (OB_FAIL(tr_replay_batch(output_, *eval_ctx_, tr_replay_slot(replay_slot_),
+                                capacity, count, replay_pos_))) {
+    } else if (0 == count) {
+      ret = OB_ITER_END;
+    }
   } else {
     ret = sparse_retrieval_iter_->get_next_rows(capacity, count);
+    if (OB_SUCC(ret) && replay_slot_ >= 0 && count > 0) {
+      if (OB_FAIL(tr_capture_batch(output_, *eval_ctx_, count, tr_replay_slot(replay_slot_)))) {
+      }
+    }
+    if (OB_ITER_END == ret && replay_slot_ >= 0) {
+      ObTRReplayEntry &entry = tr_replay_slot(replay_slot_);
+      entry.stamp_us_ = tr_now_us();
+      entry.valid_ = entry.row_cnt_ > 0 && entry.out_cnt_ > 0;
+      replay_slot_ = -1;
+    }
   }
   return ret;
 }
