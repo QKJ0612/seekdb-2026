@@ -47,7 +47,7 @@ struct ObTRReplayEntry
       stamp_us_(0), valid_(false) {}
 };
 const int64_t TR_REPLAY_SLOTS = 2;
-const int64_t TR_REPLAY_TTL_US = 200000;  // bounded staleness window
+const int64_t TR_REPLAY_TTL_US = 2000;  // idle timeout, sliding on every hit
 inline int64_t tr_now_us()
 {
   struct timespec ts;
@@ -773,6 +773,9 @@ int ObDASLegacyTRMergeIter::do_table_scan()
           replay_mode_ = true;
           replay_row_cnt_ = entry.row_cnt_;
           replay_slot_ = i;
+          // sliding window: a continuing burst of identical scans keeps the
+          // entry alive, once the burst stops the entry expires almost at once
+          entry.stamp_us_ = now_us;
           break;
         }
       }
