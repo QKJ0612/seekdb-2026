@@ -19,6 +19,7 @@
 
 
 #include "sql/resolver/ddl/ob_table_stmt.h"
+#include "sql/resolver/ddl/ob_ai_column_def.h"
 #include "sql/resolver/ddl/ob_ddl_stmt.h"
 #include "sql/resolver/ob_stmt_resolver.h"
 #include "common/sql_mode/ob_sql_mode.h"
@@ -104,6 +105,11 @@ public:
     alter_table_arg_.lock_session_create_ts_ = create_ts;
   }
   void set_lock_priority();
+  common::ObSArray<ObAiColumnDef> ai_column_defs_;
+public:
+  common::ObSArray<ObAiColumnDef> &get_ai_column_defs() { return ai_column_defs_; }
+  const common::ObSArray<ObAiColumnDef> &get_ai_column_defs() const { return ai_column_defs_; }
+  int add_ai_column_def(const ObAiColumnDef &def) { return ai_column_defs_.push_back(def); }
 private:
   obcall::ObAlterTableArg alter_table_arg_;
   bool is_comment_table_;

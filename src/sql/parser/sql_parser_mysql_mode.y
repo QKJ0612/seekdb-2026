@@ -455,7 +455,7 @@ END_P SET_VAR DELIMITER
 %type <reserved_keyword> mysql_reserved_keyword
 %type <ival> consistency_level use_plan_cache_type
 %type <node> set_type
-%type <node> drop_index_stmt hint_options opt_expr_as_list expr_as_list expr_with_opt_alias substr_params opt_comma substr_or_substring table_function_expr table_func_name
+%type <node> drop_index_stmt hint_options opt_expr_as_list expr_as_list expr_with_opt_alias substr_params opt_comma substr_or_substring table_function_expr table_func_name ai_column_options ai_column_option_list ai_column_option
 %type <node> /*frozen_type*/ opt_binary
 %type <node> create_view_stmt view_name opt_column_list opt_tablet_id view_select_stmt opt_check_option opt_algorithm view_algorithm opt_definer opt_sql_security
 %type <node> name_list
@@ -6131,6 +6131,52 @@ column_attribute_list
 { $$ = NULL; }
 ;
 
+ai_column_options:
+/* empty */
+{
+  $$ = NULL;
+}
+| WITH '(' ai_column_option_list ')'
+{
+  $$ = $3;
+}
+
+ai_column_option_list:
+ai_column_option_list ',' ai_column_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+| ai_column_option
+{
+  $$ = $1;
+}
+
+ai_column_option:
+NAME_OB COMP_EQ STRING_VALUE
+{
+  ParseNode *name_node = NULL;
+  malloc_terminal_node(name_node, result->malloc_pool_, T_VARCHAR);
+  name_node->str_value_ = $1->str_value_;
+  name_node->str_len_ = $1->str_len_;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_OPTION, 2, name_node, $3);
+}
+| NAME_OB COMP_EQ INTNUM
+{
+  ParseNode *name_node = NULL;
+  malloc_terminal_node(name_node, result->malloc_pool_, T_VARCHAR);
+  name_node->str_value_ = $1->str_value_;
+  name_node->str_len_ = $1->str_len_;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_OPTION, 2, name_node, $3);
+}
+| NAME_OB COMP_EQ NAME_OB
+{
+  ParseNode *name_node = NULL;
+  malloc_terminal_node(name_node, result->malloc_pool_, T_VARCHAR);
+  name_node->str_value_ = $1->str_value_;
+  name_node->str_len_ = $1->str_len_;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_OPTION, 2, name_node, $3);
+}
+
 column_attribute_list:
 column_attribute_list column_attribute
 {
@@ -6199,6 +6245,10 @@ not NULLX
   $$->str_len_ = $2->str_len_;
   $$->param_num_ = $2->param_num_;
   $$->sql_str_off_ = $2->sql_str_off_;
+}
+| AI COLUMN '(' expr ')' ai_column_options
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_DEFINITION, 2, $4, $6);
 }
 | SKIP_INDEX '(' opt_skip_index_type_list ')'
 {

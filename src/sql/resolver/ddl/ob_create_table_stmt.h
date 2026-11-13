@@ -20,6 +20,7 @@
 #include "sql/resolver/ddl/ob_table_stmt.h"
 #include "sql/resolver/ob_stmt_resolver.h"
 #include "sql/resolver/ddl/ob_create_index_stmt.h"
+#include "sql/resolver/ddl/ob_ai_column_def.h"
 
 namespace oceanbase
 {
@@ -57,6 +58,9 @@ public:
   share::schema::ObStmtNeedPrivs::NeedPrivs &get_view_need_privs() { return view_need_privs_; }
   const share::schema::ObStmtNeedPrivs::NeedPrivs &get_view_need_privs() const
   { return view_need_privs_; }
+  common::ObSArray<ObAiColumnDef> &get_ai_column_defs() { return ai_column_defs_; }
+  const common::ObSArray<ObAiColumnDef> &get_ai_column_defs() const { return ai_column_defs_; }
+  int add_ai_column_def(const ObAiColumnDef &def) { return ai_column_defs_.push_back(def); }
   int add_view_need_priv(share::schema::ObNeedPriv &need_priv)
   { return view_need_privs_.push_back(need_priv); }
   common::ObSArray<obcall::ObCreateIndexArg> &get_index_arg_list() { return index_arg_list_; }
@@ -78,6 +82,7 @@ public:
 
   ObTableType get_table_type() const { return create_table_arg_.schema_.get_table_type(); }
   INHERIT_TO_STRING_KV("ObTableStmt", ObTableStmt, K_(stmt_type), K_(create_table_arg), K_(index_arg_list));
+  common::ObSArray<ObAiColumnDef> ai_column_defs_;
 private:
 private:
   obcall::ObCreateTableArg create_table_arg_;

@@ -3459,6 +3459,34 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
           } else if (FALSE_IT(alter_table_stmt->set_sql_mode(session_info_->get_sql_mode()))) {
           }
         }
+        // add hidden ai columns for AI column added by ALTER
+        if (OB_SUCC(ret) && alter_table_stmt->get_ai_column_defs().count() > 0) {
+          for (int64_t ai = 0; OB_SUCC(ret) && ai < alter_table_stmt->get_ai_column_defs().count(); ++ai) {
+            const ObAiColumnDef &ai_def = alter_table_stmt->get_ai_column_defs().at(ai);
+            if (ai_def.column_name_ != alter_column_schema.get_column_name_str()) {
+              continue;
+            }
+            const char *suffixes[3] = {"__ai_state", "__ai_request", "__ai_result_spec"};
+            for (int64_t k = 0; OB_SUCC(ret) && k < 3; ++k) {
+              AlterColumnSchema hidden;
+              ObSqlString hidden_name;
+              ObColumnSchemaV2 hidden_col;
+              hidden.alter_type_ = OB_DDL_ADD_COLUMN;
+              hidden_col.set_data_type(ObVarcharType);
+              hidden_col.set_data_length(4096);
+              hidden_col.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+              hidden_col.set_nullable(true);
+              hidden_col.set_is_hidden(true);
+              hidden_col.set_charset_type(CHARSET_UTF8MB4);
+              if (OB_FAIL(hidden_name.append_fmt("%.*s%s", ai_def.column_name_.length(),
+                                                 ai_def.column_name_.ptr(), suffixes[k]))) {
+              } else if (OB_FAIL(hidden_col.set_column_name(hidden_name.ptr()))) {
+              } else if (OB_FAIL(hidden.assign(hidden_col))) {
+              } else if (OB_FAIL(alter_table_stmt->add_column(hidden))) {
+              }
+            }
+          }
+        }
       }
     }
     add_column_cnt_++;

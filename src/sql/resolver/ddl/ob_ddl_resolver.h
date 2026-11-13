@@ -529,6 +529,12 @@ protected:
                                                      bool& is_set_cur_default);
   int resolve_normal_column_attribute_constr_null(ObColumnSchemaV2 &column,
                                                   ObColumnResolveStat &resolve_stat);
+  int resolve_ai_column_attribute(share::schema::ObColumnSchemaV2 &column,
+                                  const ParseNode *attr_node);
+  int build_ai_column_normalized_expr(const ParseNode *node,
+                                      common::ObSqlString &out,
+                                      const common::ObIArray<common::ObString> &ai_names,
+                                      bool &has_ai_dep);
   int resolve_normal_column_attribute(share::schema::ObColumnSchemaV2 &column,
                                       ParseNode *attrs_node,
                                       ObColumnResolveStat &reslove_stat,

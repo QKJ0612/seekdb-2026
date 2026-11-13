@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/ddl/ob_create_table_resolver.h"
+#include "lib/string/ob_sql_string.h"
 #include "sql/resolver/dml/ob_select_resolver.h"
 #include "sql/resolver/ddl/ob_fts_index_builder_util.h"
 #include "sql/rewrite/ob_transform_utils.h"
@@ -822,6 +823,8 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
           if (OB_SUCC(ret)) {
             ObColumnSchemaV2 *tmp_col = NULL;
             if (OB_FAIL(table_schema.add_column(column))) {
+              // ai hidden columns are created below after the main column is added
+
             } else if (OB_ISNULL(tmp_col = table_schema.get_column_schema(column.get_column_id()))) {
               ret = OB_ERR_UNEXPECTED;
               LOG_WARN("get column schema failed", K(column));
@@ -881,6 +884,32 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
         // won't be here
         ret = OB_ERR_UNEXPECTED;
         SQL_RESV_LOG(WARN, "unexpected branch", K(ret));
+      }
+    }
+
+    if (OB_SUCC(ret) && create_table_stmt->get_ai_column_defs().count() > 0) {
+      for (int64_t ai = 0; OB_SUCC(ret) && ai < create_table_stmt->get_ai_column_defs().count(); ++ai) {
+        const ObAiColumnDef &ai_def = create_table_stmt->get_ai_column_defs().at(ai);
+        const char *suffix[3] = {"__ai_state", "__ai_request", "__ai_result_spec"};
+        for (int64_t si = 0; OB_SUCC(ret) && si < 3; ++si) {
+          ObColumnSchemaV2 ai_hidden_column;
+          ObSqlString name;
+          ObString hidden_name;
+          if (OB_FAIL(name.append(ai_def.column_name_))) {
+          } else if (OB_FAIL(name.append(suffix[si]))) {
+          } else if (OB_FAIL(ob_write_string(*allocator_, name.string(), hidden_name))) {
+          } else {
+            ai_hidden_column.set_column_id(gen_column_id());
+            ai_hidden_column.set_is_hidden(true);
+            ai_hidden_column.set_nullable(true);
+            ai_hidden_column.set_data_type(ObVarcharType);
+            ai_hidden_column.set_data_length(4096);
+            ai_hidden_column.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+            if (OB_FAIL(ai_hidden_column.set_column_name(hidden_name))) {
+            } else if (OB_FAIL(resolved_cols.push_back(ai_hidden_column))) {
+            }
+          }
+        }
       }
     }
 
