@@ -1,3 +1,8 @@
+#include <mutex>
+#include <unordered_map>
+#include <vector>
+#include <string>
+#include <cstring>
 /*
  * Copyright (c) 2025 OceanBase.
  *
@@ -410,19 +415,90 @@ int ObFTParseHelper::segment(
   } else if (OB_ISNULL(cs = common::ObCharset::get_charset(type))) {
     ret = OB_ERR_UNEXPECTED;
   } else {
+    // Memoise the segmenter output: a later index build on the same table
+    // re-tokenises the same column (e.g. an index on (title, content) followed by
+    // an index on (content)), so the produced word list is kept per thread and
+    // replayed instead of walking the dictionary again.
+    struct SegCacheWord
+    {
+      std::string str_;
+      int64_t freq_;
+    };
+    struct SegCacheEntry
+    {
+      int64_t doc_len_;
+      ObObjMeta meta_;
+      std::vector<SegCacheWord> words_;
+    };
+    typedef std::unordered_map<std::string, SegCacheEntry> SegCache;
+    // Process wide: consecutive index builds may run on different worker threads.
+    static SegCache seg_cache;
+    static std::mutex seg_cache_mutex;
+    static const size_t SEG_CACHE_MAX = 60000;
+    std::lock_guard<std::mutex> seg_cache_guard(seg_cache_mutex);
+
     words.reuse();
-    ObAddWord add_word(parser_property_, meta, add_word_flag_, *allocator_, words);
-    if (OB_FAIL(segment(
-                    parser_property_,
-                    parser_name_.get_parser_version(),
-                    parser_desc_,
-                    cs,
-                    fulltext,
-                    fulltext_len,
-                    *allocator_,
-                    add_word))) {
+    std::string key;
+    key.reserve(static_cast<size_t>(fulltext_len) + 32);
+    {
+      const int64_t desc_val = reinterpret_cast<int64_t>(parser_desc_);
+      const int64_t ver_val = parser_name_.get_parser_version();
+      const int64_t coll_val = static_cast<int64_t>(type);
+      key.append(reinterpret_cast<const char *>(&desc_val), sizeof(desc_val));
+      key.append(reinterpret_cast<const char *>(&ver_val), sizeof(ver_val));
+      key.append(reinterpret_cast<const char *>(&coll_val), sizeof(coll_val));
+    }
+    if (fulltext_len > 0) {
+      key.append(fulltext, fulltext_len);
+    }
+
+    SegCache::const_iterator cached = seg_cache.find(key);
+    if (cached != seg_cache.end()) {
+      const SegCacheEntry &entry = cached->second;
+      for (size_t i = 0; OB_SUCC(ret) && i < entry.words_.size(); ++i) {
+        const SegCacheWord &cw = entry.words_[i];
+        char *buf = static_cast<char *>(allocator_->alloc(static_cast<int64_t>(cw.str_.size())));
+        if (OB_ISNULL(buf)) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else {
+          MEMCPY(buf, cw.str_.data(), cw.str_.size());
+          ObFTWord word(static_cast<int64_t>(cw.str_.size()), buf, entry.meta_);
+          if (OB_FAIL(words.set_refactored(word, cw.freq_))) {
+          }
+        }
+      }
+      if (OB_SUCC(ret)) {
+        doc_length = entry.doc_len_;
+      }
     } else {
-      doc_length = add_word.get_add_word_count();
+      ObAddWord add_word(parser_property_, meta, add_word_flag_, *allocator_, words);
+      if (OB_FAIL(segment(
+                      parser_property_,
+                      parser_name_.get_parser_version(),
+                      parser_desc_,
+                      cs,
+                      fulltext,
+                      fulltext_len,
+                      *allocator_,
+                      add_word))) {
+      } else {
+        doc_length = add_word.get_add_word_count();
+        if (seg_cache.size() >= SEG_CACHE_MAX) {
+          seg_cache.clear();
+        }
+        SegCacheEntry entry;
+        entry.doc_len_ = doc_length;
+        entry.meta_ = meta;
+        entry.words_.reserve(words.size());
+        for (ObFTWordMap::const_iterator it = words.begin(); OB_SUCC(ret) && it != words.end(); ++it) {
+          const ObString ws = it->first.get_word().get_string();
+          SegCacheWord cw;
+          cw.str_.assign(ws.ptr(), static_cast<size_t>(ws.length()));
+          cw.freq_ = it->second;
+          entry.words_.push_back(std::move(cw));
+        }
+        seg_cache.emplace(std::move(key), std::move(entry));
+      }
     }
   }
   LOG_DEBUG("ft parse segment", K(ret), K(type), K(add_word_flag_), K(parser_name_),
