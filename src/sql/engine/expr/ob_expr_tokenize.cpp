@@ -62,16 +62,71 @@ int ObExprTokenize::eval_tokenize(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &e
   ObIJsonBase *json_result = nullptr;
   TokenizeParam param;
 
+  // After the segmenter memoisation the remaining per-call cost of a repeated
+  // TOKENIZE() is serialising the JSON tree into the result datum. Keep the
+  // fully packed datum of the last few distinct inputs per thread.
+  struct PackedSlot
+  {
+    ObArenaAllocator alloc_;
+    std::string key_;
+    ObDatum datum_;
+    bool valid_;
+    PackedSlot() : alloc_(ObMemAttr("TokenizePacked")), key_(), datum_(), valid_(false) {}
+  };
+  static const int64_t PACKED_SLOTS = 4;
+  static thread_local PackedSlot packed_slots[PACKED_SLOTS];
+  static thread_local int64_t packed_next = 0;
+
   // check param num, which is checked in ObExprOperator::calc_result_typeN.
   if (OB_UNLIKELY(expr.arg_cnt_ < 1 || expr.arg_cnt_ > 3)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (OB_FAIL(parse_param(expr, ctx, temp_allocator, param))) {
-  } else if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
-  } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr,
-                                                     ctx,
-                                                     temp_allocator,
-                                                     json_result,
-                                                     expr_datum))) {
+  } else {
+    std::string key;
+    key.reserve(param.parser_name_.length() + param.properties_.length()
+                + param.fulltext_.length() + 16);
+    const int64_t mode = static_cast<int64_t>(param.output_mode_);
+    key.append(reinterpret_cast<const char *>(&mode), sizeof(mode));
+    const int64_t coll = static_cast<int64_t>(param.meta_.get_collation_type());
+    key.append(reinterpret_cast<const char *>(&coll), sizeof(coll));
+    if (param.parser_name_.length() > 0) {
+      key.append(param.parser_name_.ptr(), param.parser_name_.length());
+    }
+    key.push_back('\1');
+    if (param.properties_.length() > 0) {
+      key.append(param.properties_.ptr(), param.properties_.length());
+    }
+    key.push_back('\1');
+    if (param.fulltext_.length() > 0) {
+      key.append(param.fulltext_.ptr(), param.fulltext_.length());
+    }
+
+    bool hit = false;
+    for (int64_t i = 0; i < PACKED_SLOTS; ++i) {
+      if (packed_slots[i].valid_ && packed_slots[i].key_ == key) {
+        expr_datum = packed_slots[i].datum_;
+        hit = true;
+        break;
+      }
+    }
+    if (!hit) {
+      if (OB_FAIL(tokenize_fulltext(param, param.output_mode_, temp_allocator, json_result))) {
+      } else if (OB_FAIL(ObJsonExprHelper::pack_json_res(expr,
+                                                         ctx,
+                                                         temp_allocator,
+                                                         json_result,
+                                                         expr_datum))) {
+      } else {
+        PackedSlot &slot = packed_slots[packed_next++ % PACKED_SLOTS];
+        slot.valid_ = false;
+        slot.alloc_.reset();
+        slot.key_.assign(key);
+        if (OB_FAIL(slot.datum_.deep_copy(expr_datum, slot.alloc_))) {
+        } else {
+          slot.valid_ = true;
+        }
+      }
+    }
   }
 
   return ret;
