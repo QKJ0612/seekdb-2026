@@ -344,6 +344,60 @@ int ObAlterTableResolver::check_alter_column_schemas_valid(ObAlterTableStmt &stm
   return ret;
 }
 
+int ObAlterTableResolver::resolve_ai_column_retry(const ParseNode &node)
+{
+  int ret = OB_SUCCESS;
+  ObAlterTableStmt *alter_table_stmt = get_alter_table_stmt();
+  ParseNode *name_node = NULL;
+  ParseNode *where_node = NULL;
+  ObString col_name;
+  ObString where_text;
+  char name_buf[256];
+  static const char *const AI_REQ_SUFFIX = "__ai_request";
+  if (OB_ISNULL(name_node = node.children_[0])) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid parse tree", K(ret));
+  } else if (T_IDENT != name_node->type_ || OB_ISNULL(name_node->str_value_)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid parse tree", K(ret));
+  } else {
+    col_name.assign_ptr(name_node->str_value_, name_node->str_len_);
+  }
+  if (OB_SUCC(ret) && OB_ISNULL(table_schema_)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "table schema is null", K(ret));
+  } else if (OB_SUCC(ret)) {
+    const share::schema::ObColumnSchemaV2 *col_schema = table_schema_->get_column_schema(col_name);
+    if (OB_ISNULL(col_schema)) {
+      ret = OB_ERR_BAD_FIELD_ERROR;
+      LOG_USER_ERROR(OB_ERR_BAD_FIELD_ERROR, col_name.length(), col_name.ptr());
+    } else {
+      int64_t name_len = col_name.length() + static_cast<int64_t>(STRLEN(AI_REQ_SUFFIX));
+      if (name_len >= static_cast<int64_t>(sizeof(name_buf))) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        MEMCPY(name_buf, col_name.ptr(), col_name.length());
+        MEMCPY(name_buf + col_name.length(), AI_REQ_SUFFIX, STRLEN(AI_REQ_SUFFIX) + 1);
+        ObString hidden_name(static_cast<int32_t>(name_len), name_buf);
+        if (OB_ISNULL(table_schema_->get_column_schema(hidden_name))) {
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
+        }
+      }
+    }
+  }
+  if (OB_SUCC(ret) && node.num_child_ >= 3 && OB_NOT_NULL(where_node = node.children_[2])
+      && OB_NOT_NULL(where_node->str_value_)) {
+    where_text.assign_ptr(where_node->str_value_, where_node->str_len_);
+  }
+  if (OB_SUCC(ret) && OB_NOT_NULL(alter_table_stmt)) {
+    alter_table_stmt->set_is_ai_column_retry(true);
+    alter_table_stmt->set_ai_column_retry_col_name(col_name);
+    alter_table_stmt->set_ai_column_retry_where(where_text);
+  }
+  return ret;
+}
+
 int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
 {
   int ret = OB_SUCCESS;
@@ -588,6 +642,11 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
             }
             break;
         }
+        case T_AI_COLUMN_RETRY: {
+            if (OB_FAIL(resolve_ai_column_retry(*action_node))) {
+            }
+            break;
+        }
         default: {
             ret = OB_ERR_UNEXPECTED;
             SQL_RESV_LOG(WARN, "Unknown alter table action %d", K_(action_node->type), K(ret));
@@ -596,6 +655,11 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
           }
         }
       }
+    }
+    if (OB_SUCC(ret) && alter_table_stmt->is_ai_column_retry()
+        && alter_table_stmt->get_alter_table_action_count() > 1) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "combining AI COLUMN RETRY with another ALTER action");
     }
     if (OB_FAIL(ret)) {
     } else if (OB_FAIL(check_skip_index(alter_table_stmt->get_alter_table_arg().alter_table_schema_))) {

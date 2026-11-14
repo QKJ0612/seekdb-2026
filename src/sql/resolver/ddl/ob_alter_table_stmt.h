@@ -48,6 +48,13 @@ public:
   uint64_t get_alter_table_action_count() { return alter_table_action_count_; }
   void inc_alter_table_action_count() { ++alter_table_action_count_; }
 
+  bool is_ai_column_retry() const { return is_ai_column_retry_; }
+  void set_is_ai_column_retry(const bool flag) { is_ai_column_retry_ = flag; }
+  void set_ai_column_retry_col_name(const common::ObString &name) { ai_column_retry_col_name_ = name; }
+  void set_ai_column_retry_where(const common::ObString &text) { ai_column_retry_where_ = text; }
+  const common::ObString &get_ai_column_retry_col_name() const { return ai_column_retry_col_name_; }
+  const common::ObString &get_ai_column_retry_where() const { return ai_column_retry_where_; }
+
 
   bool is_alter_system() const { return is_alter_system_; }
   void set_is_alter_system(const bool flag) { is_alter_system_ = flag; }
@@ -119,6 +126,9 @@ private:
   bool is_alter_triggers_;
   obcall::ObAlterTriggerArg tg_arg_;
   uint64_t alter_table_action_count_;
+  bool is_ai_column_retry_;
+  common::ObString ai_column_retry_col_name_;
+  common::ObString ai_column_retry_where_;
   obcall::ObExchangePartitionArg exchange_partition_arg_;
 };
 

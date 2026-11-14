@@ -1,6 +1,7 @@
 #ifndef OCEANBASE_SQL_DAS_OB_DAS_AI_COLUMN_TASK_H_
 #define OCEANBASE_SQL_DAS_OB_DAS_AI_COLUMN_TASK_H_
 #include "lib/ob_define.h"
+#include "lib/string/ob_string.h"
 #include "sql/das/ob_das_dml_ctx_define.h"
 namespace oceanbase
 {
@@ -15,6 +16,24 @@ namespace sql
 // set while the ai column worker writes a result back, so the update hook
 // does not enqueue a fresh task for its own write.
 extern thread_local bool g_ai_worker_write;
+
+// -----------------------------------------------------------------------
+// In process registry of the ai column rows which do not hold a finished
+// result yet.
+//
+// The registry is keyed by (table_id, column_id) and holds the rowkey text
+// of every row whose ai column still has an unfinished task.  The strict read
+// check answers from it, so that no nested sql statement is needed to find
+// out whether an ai column is readable: such a statement would be resolved
+// by the very same session and would deadlock the request thread.
+// -----------------------------------------------------------------------
+void ai_column_task_mark_not_ready(uint64_t table_id,
+                                   uint64_t column_id,
+                                   const common::ObString &rowkey_text);
+void ai_column_task_mark_ready(uint64_t table_id,
+                               uint64_t column_id,
+                               const common::ObString &rowkey_text);
+bool ai_column_task_has_not_ready(uint64_t table_id, uint64_t column_id);
 // create pending ai column tasks for rows written by an insert statement,
 // inside the same transaction as the user statement.
 int create_ai_column_tasks_for_insert(const uint64_t table_id,

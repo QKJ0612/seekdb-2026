@@ -335,6 +335,7 @@ END_P SET_VAR DELIMITER
 
         RECOVER REDUNDANT REFRESH RELAY RELAYLOG RELAY_LOG_FILE RELAY_LOG_POS RELAY_THREAD RELOAD REMOVE
         REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETURNED_SQLSTATE RETURNS RETURNING REVERSE
+        RETRY
         REWRITE ROLLBACK ROLLUP ROUTINE ROW ROWID ROW_COUNT ROW_FORMAT ROWS RTREE
         RUN RECYCLEBIN REPLICATION ROTATE ROW_NUMBER RUDUNDANT RECURSIVE RANDOM REDO_TRANSPORT_OPTIONS
         RANK READ_ONLY RECOVERY REJECT ROLE
@@ -14907,6 +14908,35 @@ DROP CONSTRAINT constraint_name
   (void)($3);
   $$ = NULL;
 }
+| RETRY AI COLUMN column_name opt_where
+{
+  ParseNode *retry_node = NULL;
+  ParseNode *where_text_node = NULL;
+  malloc_terminal_node(where_text_node, result->malloc_pool_, T_VARCHAR);
+  if ($5 != NULL && @5.first_column > 0 && @5.last_column >= @5.first_column) {
+    int start_pos = @5.first_column + 5;
+    int end_pos = @5.last_column;
+    const char *sql_text = result->input_sql_;
+    while (start_pos <= end_pos && (' ' == sql_text[start_pos - 1] || '\t' == sql_text[start_pos - 1]
+                                    || '\n' == sql_text[start_pos - 1] || '\r' == sql_text[start_pos - 1])) {
+      start_pos++;
+    }
+    while (end_pos >= start_pos && (' ' == sql_text[end_pos - 1] || '\t' == sql_text[end_pos - 1]
+                                   || '\n' == sql_text[end_pos - 1] || '\r' == sql_text[end_pos - 1]
+                                   || ';' == sql_text[end_pos - 1])) {
+      end_pos--;
+    }
+    if (start_pos <= end_pos) {
+      char *where_str = copy_expr_string(result, start_pos, end_pos);
+      if (NULL != where_str) {
+        where_text_node->str_value_ = where_str;
+        where_text_node->str_len_ = end_pos - start_pos + 1;
+      }
+    }
+  }
+  malloc_non_terminal_node(retry_node, result->malloc_pool_, T_AI_COLUMN_RETRY, 3, $4, $5, where_text_node);
+  $$ = retry_node;
+}
 ;
 
 algorithm_opt:
@@ -18127,6 +18157,7 @@ ACCOUNT
 |       RESTART
 |       RESTORE
 |       RESUME
+|       RETRY
 |       RETURNED_SQLSTATE
 |       RETURNING
 |       RETURNS

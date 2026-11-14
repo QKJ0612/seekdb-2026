@@ -464,6 +464,7 @@ static int handle_group(common::ObArenaAllocator &alloc,
   } else {
     int64_t affected = 0;
     common::ObMySQLTransaction trans;
+    common::ObSEArray<int64_t, 32> written_idx;
     if (OB_FAIL(trans.start(GCTX.sql_proxy_))) {
       LOG_WARN("start inner transaction failed", K(ret));
     } else {
@@ -480,7 +481,7 @@ static int handle_group(common::ObArenaAllocator &alloc,
             OB_FAIL(qsql.append(" for update"))) {
         } else if (OB_FAIL(read_one_string(alloc, qsql, cur_req, found))) {
         } else if (!found || 0 != cur_req.compare(t.request_id_)) {
-          LOG_INFO("skip stale ai column result", K(cur_req), K(t.request_id_));
+          LOG_INFO("skip stale ai column result");
           continue;
         } else {
           common::ObSqlString usql;
@@ -514,6 +515,8 @@ static int handle_group(common::ObArenaAllocator &alloc,
                 OB_FAIL(dsql.append("'"))) {
             } else if (OB_FAIL(trans.write(dsql.ptr(), affected))) {
               LOG_WARN("delete ai column task failed", K(ret));
+            } else if (OB_FAIL(written_idx.push_back(i))) {
+              LOG_WARN("record written ai column task failed", K(ret));
             }
           }
         }
@@ -523,6 +526,12 @@ static int handle_group(common::ObArenaAllocator &alloc,
         LOG_WARN("end inner transaction failed", K(end_ret));
         if (OB_SUCC(ret)) {
           ret = end_ret;
+        }
+      } else {
+        // the results are stored, the rows hold a finished result again
+        for (int64_t i = 0; i < written_idx.count(); ++i) {
+          const TaskRow &t = tasks.at(begin + written_idx.at(i));
+          sql::ai_column_task_mark_ready(t.table_id_, t.column_id_, t.rowkey_text_);
         }
       }
     }

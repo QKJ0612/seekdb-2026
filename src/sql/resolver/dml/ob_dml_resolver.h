@@ -175,6 +175,8 @@ class ObDMLResolver : public ObStmtResolver
 public:
   explicit ObDMLResolver(ObResolverParams &params);
   virtual ~ObDMLResolver();
+  // check whether the statement reads an AI column which still has unfinished tasks
+  int check_ai_column_strict_read(uint64_t table_id, const common::ObString &column_name);
   friend class ObDefaultValueUtils;
   inline void set_current_level(int32_t level) { current_level_ = level; }
   inline int32_t get_current_level() const { return current_level_; }
@@ -890,6 +892,9 @@ protected:
 
   //for values table used to insert stmt:insert into table values row()....
   ObInsertResolver *upper_insert_resolver_;
+  //set while the resolver resolves a column which the statement itself does
+  //not reference, e.g. the implicit invalidation of an ai column
+  bool ai_strict_read_suppressed_;
 protected:
   DISALLOW_COPY_AND_ASSIGN(ObDMLResolver);
 };

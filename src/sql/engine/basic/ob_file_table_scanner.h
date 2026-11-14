@@ -403,6 +403,10 @@ public:
           if (0 == ::strcmp(nm, ".") || 0 == ::strcmp(nm, "..")) {
             continue;
           }
+          // hidden files are not visible to glob, keep the same behavior as duckdb
+          if ('.' == nm[0]) {
+            continue;
+          }
           common::ObString name(static_cast<int32_t>(::strlen(nm)), nm);
           if (pattern.length() > 0 && !match_glob(pattern, name)) {
             continue;

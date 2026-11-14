@@ -951,6 +951,118 @@ int ObAlterTableExecutor::alter_table_exchange_partition_rpc(obcall::ObExchangeP
   return ret;
 }
 
+
+static bool ob_ai_is_word_char(char c)
+{
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+         || c == '_' || c == '$';
+}
+
+int ObAlterTableExecutor::rewrite_ai_retry_predicate(common::ObIAllocator &allocator,
+                                                      const common::ObString &where_text,
+                                                      const common::ObString &col_name,
+                                                      common::ObString &out_pred)
+{
+  int ret = OB_SUCCESS;
+  out_pred = common::ObString();
+  if (where_text.length() <= 0 || OB_ISNULL(where_text.ptr())) {
+    return ret;
+  }
+  common::ObSqlString buf;
+  const char *sql = where_text.ptr();
+  const int64_t len = where_text.length();
+  int64_t i = 0;
+  while (OB_SUCC(ret) && i < len) {
+    const char c = sql[i];
+    if (c == '\'' || c == '"' || c == '`') {
+      int64_t j = i + 1;
+      while (j < len) {
+        if (sql[j] == '\\' && j + 1 < len) {
+          j += 2;
+          continue;
+        }
+        if (sql[j] == c) {
+          j++;
+          break;
+        }
+        j++;
+      }
+      if (OB_FAIL(buf.append(sql + i, j - i))) { break; }
+      i = j;
+      continue;
+    }
+    if (c == '-' && i + 1 < len && sql[i + 1] == '-') {
+      int64_t j = i;
+      while (j < len && sql[j] != '\n') { j++; }
+      if (OB_FAIL(buf.append(sql + i, j - i))) { break; }
+      i = j;
+      continue;
+    }
+    if (c == '/' && i + 1 < len && sql[i + 1] == '*') {
+      int64_t j = i + 2;
+      while (j + 1 < len && !(sql[j] == '*' && sql[j + 1] == '/')) { j++; }
+      j = (j + 1 < len) ? (j + 2) : len;
+      if (OB_FAIL(buf.append(sql + i, j - i))) { break; }
+      i = j;
+      continue;
+    }
+    if (ob_ai_is_word_char(c)) {
+      int64_t j = i;
+      while (j < len && ob_ai_is_word_char(sql[j])) { j++; }
+      const int64_t wlen = j - i;
+      const bool word_boundary = (i == 0) || (!ob_ai_is_word_char(sql[i - 1]) && sql[i - 1] != '.');
+      if (6 == wlen && word_boundary && 0 == strncasecmp(sql + i, "status", 6)) {
+        common::ObSqlString expr;
+        if (OB_FAIL(expr.append_fmt("(case when `%.*s` is null then 'FAILED' else 'READY' end)",
+                                    col_name.length(), col_name.ptr()))) { break; }
+        if (OB_FAIL(buf.append(expr.ptr(), expr.length()))) { break; }
+      } else if (OB_FAIL(buf.append(sql + i, wlen))) { break; }
+      i = j;
+      continue;
+    }
+    if (OB_FAIL(buf.append(sql + i, 1))) { break; }
+    i++;
+  }
+  if (OB_SUCC(ret)) {
+    char *copy = (char *)allocator.alloc(buf.length() + 1);
+    if (OB_ISNULL(copy)) {
+      return OB_ALLOCATE_MEMORY_FAILED;
+    }
+    MEMCPY(copy, buf.ptr(), buf.length());
+    copy[buf.length()] = '\0';
+    out_pred.assign_ptr(copy, static_cast<int32_t>(buf.length()));
+  }
+  return ret;
+}
+
+int ObAlterTableExecutor::execute_ai_column_retry(ObExecContext &ctx, ObAlterTableStmt &stmt)
+{
+  int ret = OB_SUCCESS;
+  common::ObArenaAllocator allocator(ObModIds::OB_SQL_EXECUTOR);
+  const common::ObString &db_name = stmt.get_database_name();
+  const common::ObString &table_name = stmt.get_table_name();
+  const common::ObString &col_name = stmt.get_ai_column_retry_col_name();
+  const common::ObString &where_text = stmt.get_ai_column_retry_where();
+  common::ObString pred;
+  int64_t affected_rows = 0;
+  if (OB_FAIL(rewrite_ai_retry_predicate(allocator, where_text, col_name, pred))) {
+  } else {
+    // the AI column is set to null, so the AI result of every matched row has
+    // to be recomputed.  The update hook of the das layer creates the task
+    // for the row, even when the row keeps its null value.
+    common::ObSqlString sql;
+    if (OB_FAIL(sql.append_fmt("update `%.*s`.`%.*s` set `%.*s` = null",
+                                db_name.length(), db_name.ptr(),
+                                table_name.length(), table_name.ptr(),
+                                col_name.length(), col_name.ptr()))) {
+    } else if (pred.length() > 0 && OB_FAIL(sql.append_fmt(" where %.*s", pred.length(), pred.ptr()))) {
+    } else if (OB_FAIL(ctx.get_sql_proxy()->write(sql.ptr(), affected_rows))) {
+    } else {
+    }
+  }
+  return ret;
+}
+
 int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
 {
   int ret = OB_SUCCESS;
@@ -968,6 +1080,9 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
       OZ (query::serialize_root_service_call(
           [&]{ return ctx.root_command_service().alter_trigger(stmt.get_tg_arg()); }),
           GCTX.self_addr());
+    }
+  } else if (stmt.is_ai_column_retry()) {
+    if (OB_FAIL(execute_ai_column_retry(ctx, stmt))) {
     }
   } else {
     ObSQLSessionInfo *my_session = NULL;

@@ -389,7 +389,11 @@ int ObUpdateResolver::add_ai_column_invalidation_assignments(
         ObSEArray<ObColumnRefRawExpr *, 1> col_exprs;
         ColumnItem *col_item = NULL;
         ObConstRawExpr *null_expr = NULL;
-        if (OB_FAIL(add_column_to_stmt(*table_item, *ai_col, col_exprs))) {
+        // the implicit invalidation is not a reference of the statement
+        ai_strict_read_suppressed_ = true;
+        int tmp_ret = add_column_to_stmt(*table_item, *ai_col, col_exprs);
+        ai_strict_read_suppressed_ = false;
+        if (OB_FAIL(tmp_ret)) {
           LOG_WARN("add column to stmt failed", K(ret));
         } else if (OB_ISNULL(col_item = stmt->get_column_item_by_id(
                        table_item->table_id_, ai_col->get_column_id()))) {

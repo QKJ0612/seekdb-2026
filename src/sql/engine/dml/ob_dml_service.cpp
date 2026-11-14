@@ -34,6 +34,8 @@
 #include "sql/engine/ob_batch_rows.h"
 #include "sql/engine/ob_physical_plan.h"
 #include "query/vector/ob_vector_index_util.h"
+#include "share/schema/ob_multi_version_schema_service.h"
+#include "share/schema/ob_schema_getter_guard.h"
 namespace oceanbase
 {
 using namespace common;
@@ -430,6 +432,111 @@ int ObDMLService::check_lob_column_changed(ObEvalCtx &eval_ctx,
   return ret;
 }
 
+// -----------------------------------------------------------------------
+// AI result columns of a table.
+//
+// An AI column owns a hidden <column>__ai_request column.  An update which
+// assigns such a column has to write the row even when the new value equals
+// the old one: the AI result of the row has to be recomputed, otherwise the
+// row would never get a fresh task.
+// -----------------------------------------------------------------------
+namespace {
+struct AiColumnIdCache
+{
+  AiColumnIdCache() : table_id_(0), schema_version_(-1), valid_(false) {}
+  uint64_t table_id_;
+  int64_t schema_version_;
+  bool valid_;
+  common::ObSEArray<uint64_t, 8> ai_column_ids_;
+};
+
+thread_local AiColumnIdCache t_ai_column_id_cache;
+
+bool is_ai_request_column_name(const char *name)
+{
+  static const char *const AI_REQ_SUFFIX = "__ai_request";
+  if (OB_ISNULL(name)) {
+    return false;
+  }
+  const int64_t name_len = STRLEN(name);
+  const int64_t suffix_len = STRLEN(AI_REQ_SUFFIX);
+  return name_len > suffix_len
+         && 0 == strncmp(name + name_len - suffix_len, AI_REQ_SUFFIX, suffix_len);
+}
+
+int collect_ai_column_ids(uint64_t table_id,
+                          common::ObSEArray<uint64_t, 8> &ai_column_ids)
+{
+  int ret = OB_SUCCESS;
+  static const char *const AI_REQ_SUFFIX = "__ai_request";
+  share::schema::ObSchemaGetterGuard guard;
+  const share::schema::ObTableSchema *table_schema = NULL;
+  if (OB_FAIL(share::schema::ObMultiVersionSchemaService::get_instance().get_runtime_schema_guard(guard))) {
+  } else if (OB_FAIL(guard.get_table_schema(table_id, table_schema))) {
+  } else if (OB_ISNULL(table_schema)) {
+    ret = OB_TABLE_NOT_EXIST;
+  } else {
+    const int64_t column_count = table_schema->get_column_count();
+    for (int64_t i = 0; OB_SUCC(ret) && i < column_count; ++i) {
+      const share::schema::ObColumnSchemaV2 *column = table_schema->get_column_schema_by_idx(i);
+      if (OB_ISNULL(column) || !column->is_hidden()
+          || !is_ai_request_column_name(column->get_column_name())) {
+        continue;
+      }
+      const common::ObString name = column->get_column_name_str();
+      const common::ObString base_name(static_cast<int32_t>(name.length() - STRLEN(AI_REQ_SUFFIX)),
+                                        name.ptr());
+      const share::schema::ObColumnSchemaV2 *base_column = table_schema->get_column_schema(base_name);
+      if (OB_ISNULL(base_column)) {
+        continue;
+      }
+      if (OB_FAIL(ai_column_ids.push_back(base_column->get_column_id()))) {
+      }
+    }
+  }
+  return ret;
+}
+
+// true when the update assigns an AI result column of the table
+bool update_touches_ai_column(const ObUpdCtDef &upd_ctdef)
+{
+  int ret = OB_SUCCESS;
+  const ObDASUpdCtDef &das_ctdef = upd_ctdef.dupd_ctdef_;
+  const int64_t updated_count = das_ctdef.updated_column_ids_.count();
+  if (updated_count <= 0) {
+    return false;
+  }
+  // das_ctdef.table_id_ is the das level id, the schema table id is the one of
+  // the data table, it is the key the ai column metadata is stored with
+  const uint64_t table_id = das_ctdef.table_param_.get_data_table().get_table_id();
+  AiColumnIdCache &cache = t_ai_column_id_cache;
+  if (!cache.valid_ || cache.table_id_ != table_id
+      || cache.schema_version_ != das_ctdef.schema_version_) {
+    cache.ai_column_ids_.reset();
+    ret = collect_ai_column_ids(table_id, cache.ai_column_ids_);
+    if (common::OB_SUCCESS == ret) {
+      cache.table_id_ = table_id;
+      cache.schema_version_ = das_ctdef.schema_version_;
+      cache.valid_ = true;
+    } else {
+      cache.valid_ = false;
+    }
+  }
+  if (!cache.valid_) {
+    return false;
+  }
+  for (int64_t i = 0; i < updated_count; ++i) {
+    const uint64_t updated_column_id = das_ctdef.updated_column_ids_.at(i);
+    for (int64_t j = 0; j < cache.ai_column_ids_.count(); ++j) {
+      if (cache.ai_column_ids_.at(j) == updated_column_id) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+} // namespace
+
 int ObDMLService::check_row_whether_changed(const ObUpdCtDef &upd_ctdef,
                                             ObUpdRtDef &upd_rtdef,
                                             ObEvalCtx &eval_ctx)
@@ -504,6 +611,13 @@ int ObDMLService::check_row_whether_changed(const ObUpdCtDef &upd_ctdef,
         }
       }
     }
+  }
+  if (OB_SUCC(ret) && !upd_rtdef.is_row_changed_ && upd_ctdef.is_primary_index_
+      && update_touches_ai_column(upd_ctdef)) {
+    // an AI result column is assigned: the row has to be written even when
+    // the new value equals the old one, otherwise the AI result of the row
+    // would never be recomputed
+    upd_rtdef.is_row_changed_ = true;
   }
   if (OB_SUCC(ret) &&
       upd_rtdef.is_row_changed_ &&

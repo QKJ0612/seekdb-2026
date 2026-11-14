@@ -36,6 +36,10 @@
 #include "share/rc/ob_server_runtime.h"
 #include "sql/engine/dml/ob_dml_service.h"
 #include "sql/das/ob_das_domain_utils.h"
+#include <map>
+#include <set>
+#include <string>
+#include "lib/lock/ob_mutex.h"
 
 namespace oceanbase
 {
@@ -436,6 +440,71 @@ namespace sql
 {
 thread_local bool g_ai_worker_write = false;
 
+static int delete_task_rows(common::ObIAllocator &alloc,
+                            transaction::ObTxDesc *tx_desc,
+                            const transaction::ObTxReadSnapshot &snapshot,
+                            const share::schema::ObTableSchema &task_schema,
+                            const common::ObIArray<uint64_t> &column_ids,
+                            common::ObIArray<blocksstable::ObDatumRow *> &rows)
+{
+  int ret = common::OB_SUCCESS;
+  storage::ObAccessService *oas = ::oceanbase::share::server_service<storage::ObAccessService>();
+  share::schema::ObTableDMLParam table_param(alloc);
+  storage::ObDMLBaseParam dml_param;
+  storage::ObStoreCtxGuard store_ctx_guard;
+  const int64_t timeout_us = ObTimeUtility::current_time() + 10 * 1000 * 1000;
+  if (OB_ISNULL(oas) || OB_ISNULL(tx_desc)) {
+    ret = common::OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(table_param.convert(&task_schema, task_schema.get_schema_version(), column_ids))) {
+    LOG_WARN("convert task dml param failed", K(ret));
+  } else {
+    share::schema::ObSchemaGetterGuard sguard;
+    int64_t schema_version = 0;
+    if (OB_FAIL(share::schema::ObMultiVersionSchemaService::get_instance().get_runtime_schema_guard(sguard))) {
+    } else if (OB_FAIL(sguard.get_schema_version(schema_version))) {
+    } else {
+      dml_param.runtime_schema_version_ = schema_version;
+    }
+    if (OB_SUCC(ret)) {
+      dml_param.sql_mode_ = SMO_DEFAULT;
+      dml_param.write_flag_.reset();
+      dml_param.table_param_ = &table_param;
+      dml_param.timeout_ = timeout_us;
+      dml_param.snapshot_.assign(snapshot);
+      dml_param.branch_id_ = 0;
+      dml_param.store_ctx_guard_ = &store_ctx_guard;
+      dml_param.schema_version_ = task_schema.get_schema_version();
+      dml_param.dml_allocator_ = &alloc;
+      if (OB_SUCC(ret)) {
+        ret = oas->get_write_store_ctx_guard(timeout_us, *tx_desc, snapshot, 0,
+                                             dml_param.write_flag_, store_ctx_guard);
+      }
+      // The rows are deleted one by one: a batch delete aborts on the first row
+      // which is gone already and the pending tasks of the other rows would
+      // survive, so the insert of the refreshed tasks would run into a primary
+      // key conflict.
+      for (int64_t i = 0; OB_SUCC(ret) && i < rows.count(); ++i) {
+        storage::ObValueRowIterator row_iter;
+        if (OB_FAIL(row_iter.init())) {
+          LOG_WARN("init task delete iter failed", K(ret));
+        } else if (OB_FAIL(row_iter.add_row(*rows.at(i)))) {
+          LOG_WARN("add task delete row failed", K(ret), K(i));
+        } else {
+          int64_t affected = 0;
+          int one_ret = oas->delete_rows(task_schema.get_tablet_id(), *tx_desc, dml_param,
+                                         column_ids, &row_iter, affected);
+          if (common::OB_ERR_DEFENSIVE_CHECK == one_ret) {
+            // the pending task row has been removed already, nothing to delete
+            one_ret = common::OB_SUCCESS;
+          }
+          ret = one_ret;
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 namespace ai_column_task
 {
 static const char *const REQ_SUFFIX = "__ai_request";
@@ -543,7 +612,6 @@ static int build_rowkey_by_cols(const share::schema::ObTableSchema &schema,
     const share::schema::ObColumnSchemaV2 *col = schema.get_column_schema(cid);
     if (pos < 0 || NULL == col) {
       ret = common::OB_ERR_UNEXPECTED;
-      LOG_ERROR("DBG rowkey miss", K(ret), K(cid), K(pos), "n_cids", column_ids.count());
     } else if (row.storage_datums_[pos].is_null()) {
       ret = common::OB_ITEM_NOT_MATCH;
       LOG_WARN("rowkey is null, skip ai task", K(ret), K(cid));
@@ -555,9 +623,7 @@ static int build_rowkey_by_cols(const share::schema::ObTableSchema &schema,
       }
       if (OB_SUCC(ret) && OB_FAIL(format_datum(key, pred, col->get_column_name_str(),
                                                row.storage_datums_[pos], col->get_data_type()))) {
-        LOG_ERROR("DBG format_datum failed", K(ret), K(cid));
       }
-      LOG_ERROR("DBG rowkey part", K(i), K(cid), K(pos), "key_len", key.length(), "pred_len", pred.length());
     }
   }
   return ret;
@@ -641,26 +707,41 @@ static int write_task_rows(common::ObIAllocator &alloc,
       ret = oas->insert_rows(task_schema.get_tablet_id(), *tx_desc, dml_param,
                              column_ids, &row_iter, affected_rows);
       if (common::OB_ERR_PRIMARY_KEY_DUPLICATE == ret) {
-        // a pending task for the same rowkey already exists: refresh it in place
-        common::ObSEArray<uint64_t, 8> updated_ids;
-        for (int64_t ci = 3; OB_SUCC(ret) && ci < column_ids.count(); ++ci) {
-          ret = updated_ids.push_back(column_ids.at(ci));
-        }
-        storage::ObValueRowIterator retry_iter;
-        if (OB_SUCC(ret) && OB_FAIL(retry_iter.init())) {
-          LOG_WARN("init retry iter failed", K(ret));
-        }
-        for (int64_t ri = 0; OB_SUCC(ret) && ri < rows.count(); ++ri) {
-          if (OB_FAIL(retry_iter.add_row(*rows.at(ri)))) {
-            LOG_WARN("add retry row failed", K(ret), K(ri));
+        // the repair below starts from a clean error state
+        ret = common::OB_SUCCESS;
+        // A pending task for the same rowkey already exists.  The delete has to
+        // address the primary key only: with the full column list the storage
+        // layer turns the remaining columns into a match condition and the new
+        // row carries a different request id and timestamps, so the stored row
+        // never matches, survives the delete and the insert keeps failing.  The
+        // task would be lost then and the ai column would never be recomputed.
+        common::ObSEArray<uint64_t, 8> pk_ids;
+        for (int64_t ci = 0; OB_SUCC(ret) && ci < 3 && ci < column_ids.count(); ++ci) {
+          if (OB_FAIL(pk_ids.push_back(column_ids.at(ci)))) {
+            LOG_WARN("push task pk id failed", K(ret));
           }
         }
-        if (OB_SUCC(ret)) {
-          // a pending task for this rowkey exists: replace it in place so the
-          // newer request wins, still inside the user transaction.
-          dml_param.write_flag_.reset();
-          ret = oas->delete_rows(task_schema.get_tablet_id(), *tx_desc, dml_param,
-                                 column_ids, &retry_iter, affected_rows);
+        for (int64_t attempt = 0; OB_SUCC(ret) && attempt < 3; ++attempt) {
+          common::ObSEArray<blocksstable::ObDatumRow *, 16> del_rows;
+          for (int64_t ri = 0; OB_SUCC(ret) && ri < rows.count(); ++ri) {
+            blocksstable::ObDatumRow *del_row = NULL;
+            if (OB_FAIL(data_plane::create_datum_row(alloc, 3, del_row))) {
+              LOG_WARN("create task del row failed", K(ret));
+            } else if (OB_ISNULL(del_row)) {
+              ret = common::OB_ERR_UNEXPECTED;
+            } else {
+              del_row->row_flag_.set_flag(blocksstable::ObDmlFlag::DF_DELETE);
+              for (int64_t di = 0; di < 3; ++di) {
+                del_row->storage_datums_[di] = rows.at(ri)->storage_datums_[di];
+              }
+              if (OB_FAIL(del_rows.push_back(del_row))) {
+                LOG_WARN("push task del row failed", K(ret));
+              }
+            }
+          }
+          if (OB_SUCC(ret) && !del_rows.empty()) {
+            ret = delete_task_rows(alloc, tx_desc, snapshot, task_schema, pk_ids, del_rows);
+          }
           if (OB_SUCC(ret)) {
             dml_param.write_flag_.set_is_insert_up();
             storage::ObValueRowIterator ins_iter;
@@ -675,8 +756,13 @@ static int write_task_rows(common::ObIAllocator &alloc,
             if (OB_SUCC(ret)) {
               ret = oas->insert_rows(task_schema.get_tablet_id(), *tx_desc, dml_param,
                                      column_ids, &ins_iter, affected_rows);
+              if (common::OB_ERR_PRIMARY_KEY_DUPLICATE == ret) {
+                // another transaction inserted the task in the meantime, try again
+                continue;
+              }
             }
           }
+          break;
         }
       }
     }
@@ -687,13 +773,52 @@ static int write_task_rows(common::ObIAllocator &alloc,
 
 } // namespace ai_column_task
 
-// defined below; used by the update path to refresh pending tasks in place
-static int delete_task_rows(common::ObIAllocator &alloc,
-                            transaction::ObTxDesc *tx_desc,
-                            const transaction::ObTxReadSnapshot &snapshot,
-                            const share::schema::ObTableSchema &task_schema,
-                            const common::ObIArray<uint64_t> &column_ids,
-                            common::ObIArray<blocksstable::ObDatumRow *> &rows);
+// -----------------------------------------------------------------------
+// In process registry of the ai column rows which do not hold a finished
+// result yet.  See ob_das_ai_column_task.h for the contract.
+// -----------------------------------------------------------------------
+namespace {
+typedef std::set<std::string> AiNotReadyRowkeys;
+typedef std::map<std::pair<uint64_t, uint64_t>, AiNotReadyRowkeys> AiNotReadyMap;
+lib::ObMutex g_ai_not_ready_mutex;
+AiNotReadyMap g_ai_not_ready_map;
+}
+
+void ai_column_task_mark_not_ready(uint64_t table_id,
+                                   uint64_t column_id,
+                                   const common::ObString &rowkey_text)
+{
+  if (OB_ISNULL(rowkey_text.ptr()) || rowkey_text.length() <= 0) {
+    return;
+  }
+  lib::ObMutexGuard guard(g_ai_not_ready_mutex);
+  AiNotReadyRowkeys &rowkeys = g_ai_not_ready_map[std::make_pair(table_id, column_id)];
+  rowkeys.insert(std::string(rowkey_text.ptr(), rowkey_text.length()));
+}
+
+void ai_column_task_mark_ready(uint64_t table_id,
+                               uint64_t column_id,
+                               const common::ObString &rowkey_text)
+{
+  if (OB_ISNULL(rowkey_text.ptr()) || rowkey_text.length() <= 0) {
+    return;
+  }
+  lib::ObMutexGuard guard(g_ai_not_ready_mutex);
+  AiNotReadyMap::iterator it = g_ai_not_ready_map.find(std::make_pair(table_id, column_id));
+  if (it != g_ai_not_ready_map.end()) {
+    it->second.erase(std::string(rowkey_text.ptr(), rowkey_text.length()));
+    if (it->second.empty()) {
+      g_ai_not_ready_map.erase(it);
+    }
+  }
+}
+
+bool ai_column_task_has_not_ready(uint64_t table_id, uint64_t column_id)
+{
+  lib::ObMutexGuard guard(g_ai_not_ready_mutex);
+  AiNotReadyMap::const_iterator it = g_ai_not_ready_map.find(std::make_pair(table_id, column_id));
+  return it != g_ai_not_ready_map.end() && !it->second.empty();
+}
 
 int create_ai_column_tasks_for_insert(const uint64_t table_id,
                                       const ObDASInsCtDef &ctdef,
@@ -784,6 +909,9 @@ int create_ai_column_tasks_for_insert(const uint64_t table_id,
           task_row->storage_datums_[8].set_int(0);
           task_row->storage_datums_[9].set_timestamp(now_us);
           if (OB_FAIL(task_rows.push_back(task_row))) {
+          } else {
+            // the ai column of this row has no finished result yet
+      ai_column_task_mark_not_ready(table_id, ai_col_ids.at(c), key_text);
           }
         }
       }
@@ -957,6 +1085,9 @@ int create_ai_column_tasks_for_update(const uint64_t table_id,
           // transaction before the worker consumes it.
           task_row->storage_datums_[9].set_timestamp(now_us + 200 * 1000);
           if (OB_FAIL(task_rows.push_back(task_row))) {
+          } else {
+            // the ai column of this row has no finished result yet
+      ai_column_task_mark_not_ready(table_id, touched_ai_ids.at(c), key_text);
           }
         }
       }
@@ -996,7 +1127,7 @@ int create_ai_column_tasks_for_update(const uint64_t table_id,
       }
       if (OB_FAIL(ai_column_task::write_task_rows(alloc, tx_desc, *snapshot, *task_schema,
                                                   task_column_ids, task_rows))) {
-        LOG_WARN("write ai column tasks for update failed", K(ret), K(task_rows.count()));
+        LOG_ERROR("write ai column tasks for update failed", K(ret), K(task_rows.count()));
       }
     }
   }
@@ -1004,63 +1135,6 @@ int create_ai_column_tasks_for_update(const uint64_t table_id,
 }
 
 
-static int delete_task_rows(common::ObIAllocator &alloc,
-                            transaction::ObTxDesc *tx_desc,
-                            const transaction::ObTxReadSnapshot &snapshot,
-                            const share::schema::ObTableSchema &task_schema,
-                            const common::ObIArray<uint64_t> &column_ids,
-                            common::ObIArray<blocksstable::ObDatumRow *> &rows)
-{
-  int ret = common::OB_SUCCESS;
-  storage::ObAccessService *oas = ::oceanbase::share::server_service<storage::ObAccessService>();
-  share::schema::ObTableDMLParam table_param(alloc);
-  storage::ObDMLBaseParam dml_param;
-  storage::ObStoreCtxGuard store_ctx_guard;
-  const int64_t timeout_us = ObTimeUtility::current_time() + 10 * 1000 * 1000;
-  if (OB_ISNULL(oas) || OB_ISNULL(tx_desc)) {
-    ret = common::OB_ERR_UNEXPECTED;
-  } else if (OB_FAIL(table_param.convert(&task_schema, task_schema.get_schema_version(), column_ids))) {
-    LOG_WARN("convert task dml param failed", K(ret));
-  } else {
-    share::schema::ObSchemaGetterGuard sguard;
-    int64_t schema_version = 0;
-    if (OB_FAIL(share::schema::ObMultiVersionSchemaService::get_instance().get_runtime_schema_guard(sguard))) {
-    } else if (OB_FAIL(sguard.get_schema_version(schema_version))) {
-    } else {
-      dml_param.runtime_schema_version_ = schema_version;
-    }
-    if (OB_SUCC(ret)) {
-      dml_param.sql_mode_ = SMO_DEFAULT;
-      dml_param.write_flag_.reset();
-      dml_param.table_param_ = &table_param;
-      dml_param.timeout_ = timeout_us;
-      dml_param.snapshot_.assign(snapshot);
-      dml_param.branch_id_ = 0;
-      dml_param.store_ctx_guard_ = &store_ctx_guard;
-      dml_param.schema_version_ = task_schema.get_schema_version();
-      dml_param.dml_allocator_ = &alloc;
-      storage::ObValueRowIterator row_iter;
-      if (OB_FAIL(row_iter.init())) {
-        LOG_WARN("init task delete iter failed", K(ret));
-      }
-      for (int64_t i = 0; OB_SUCC(ret) && i < rows.count(); ++i) {
-        if (OB_FAIL(row_iter.add_row(*rows.at(i)))) {
-          LOG_WARN("add task delete row failed", K(ret), K(i));
-        }
-      }
-      if (OB_SUCC(ret)) {
-        ret = oas->get_write_store_ctx_guard(timeout_us, *tx_desc, snapshot, 0,
-                                             dml_param.write_flag_, store_ctx_guard);
-      }
-      if (OB_SUCC(ret)) {
-        int64_t affected = 0;
-        ret = oas->delete_rows(task_schema.get_tablet_id(), *tx_desc, dml_param,
-                               column_ids, &row_iter, affected);
-      }
-    }
-  }
-  return ret;
-}
 
 int delete_ai_column_tasks_for_delete(const uint64_t table_id,
                                       const ObDASDelCtDef &ctdef,
@@ -1122,6 +1196,9 @@ int delete_ai_column_tasks_for_delete(const uint64_t table_id,
             del_row->storage_datums_[1].set_int(static_cast<int64_t>(all_ai_ids.at(c)));
             del_row->storage_datums_[2].set_string(key_text);
             if (OB_FAIL(del_rows.push_back(del_row))) {
+            } else {
+              // the row is gone, it must not block a strict read anymore
+              ai_column_task_mark_ready(table_id, all_ai_ids.at(c), key_text);
             }
           }
         }

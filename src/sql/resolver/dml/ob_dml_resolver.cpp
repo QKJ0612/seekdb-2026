@@ -17,6 +17,9 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "config_bridge.h"
 #include "ob_dml_resolver.h"
+#include "share/schema/ob_schema_getter_guard.h"
+#include "common/mysqlclient/ob_mysql_proxy.h"
+#include "lib/string/ob_sql_string.h"
 #include "sql/engine/basic/ob_file_table_scanner.h"
 #include "sql/engine/basic/ob_parquet_file.h"
 #include "share/session/ob_local_session_var.h"
@@ -39,6 +42,7 @@
 #include "sql/engine/aggregate/ob_aggregate_processor.h"
 #include "sql/optimizer/ob_opt_selectivity.h"
 #include "sql/das/ob_domain_id.h"
+#include "sql/das/ob_das_ai_column_task.h"
 #include "query/vector/ob_vector_index_util.h"
 #include "sql/engine/expr/ob_expr_regexp.h"
 #include "sql/resolver/dcl/ob_dcl_resolver.h"
@@ -75,7 +79,8 @@ ObDMLResolver::ObDMLResolver(ObResolverParams &params)
       current_cte_tables_(),
       expr_resv_ctx_(params.query_ctx_),
       cte_ctx_(),
-      upper_insert_resolver_(NULL)
+      upper_insert_resolver_(NULL),
+      ai_strict_read_suppressed_(false)
 {
   column_namespace_checker_.set_joininfos(&join_infos_);
 }
@@ -3061,6 +3066,12 @@ int ObDMLResolver::resolve_table_column_expr(const ObQualifiedName &q_name, ObRa
         ret = OB_ERR_UNEXPECTED;
       } else {
         real_ref_expr = col_item->expr_;
+        // the statement really references the column, so an AI column which
+        // still has unfinished tasks cannot be read in strict read mode
+        if (OB_SUCC(ret)
+            && OB_FAIL(check_ai_column_strict_read(table_item->ref_id_, q_name.col_name_))) {
+          // the user error has been reported already
+        }
       }
     }
   }
@@ -13593,3 +13604,84 @@ int ObDMLResolver::check_need_fill_embedded_vec_expr_param(const ObDMLStmt &stmt
 
 }  // namespace sql
 }  // namespace oceanbase
+
+// -----------------------------------------------------------------------
+// AI column strict read.
+//
+// When the session variable ai_column_strict_read is on, a statement which
+// references an AI column is rejected with OB_AI_COLUMN_NOT_READY as long as
+// the AI column still has unfinished work, that is as long as some row of the
+// column does not hold a finished result yet.
+//
+// The check runs where the column reference is resolved, so only the columns
+// which the statement really references are examined.  The implicit
+// invalidation of an AI column does not count as a reference.
+//
+// The readiness is answered by the in process registry of the das layer: a
+// probe statement would be resolved by the very same session and would
+// deadlock the request thread.
+// -----------------------------------------------------------------------
+int ObDMLResolver::check_ai_column_strict_read(uint64_t table_id,
+                                                const common::ObString &column_name)
+{
+  int ret = OB_SUCCESS;
+  if (ai_strict_read_suppressed_ || OB_ISNULL(session_info_) || OB_ISNULL(schema_checker_)) {
+    return ret;
+  }
+  ObDMLStmt *stmt = get_stmt();
+  if (OB_ISNULL(stmt)) {
+    return ret;
+  }
+  // only a statement which reads the table may be blocked, an insert writes
+  // the column instead of reading the unfinished result
+  if (!stmt->is_select_stmt() && !stmt->is_update_stmt() && !stmt->is_delete_stmt()) {
+    return ret;
+  }
+  if (session_info_->is_inner() || oceanbase::sql::g_ai_worker_write) {
+    // the ai worker writes the result back, it must not be blocked
+    return ret;
+  }
+  bool strict_read = false;
+  if (OB_FAIL(session_info_->get_sys_variable(share::SYS_VAR_AI_COLUMN_STRICT_READ,
+                                              strict_read))) {
+    return OB_SUCCESS;
+  }
+  if (!strict_read) {
+    return ret;
+  }
+  const share::schema::ObTableSchema *table_schema = NULL;
+  if (OB_FAIL(schema_checker_->get_table_schema(table_id, table_schema))
+      || OB_ISNULL(table_schema)) {
+    return ret;
+  }
+  char column_name_buf[OB_MAX_COLUMN_NAME_LENGTH + 1];
+  int name_len = snprintf(column_name_buf, sizeof(column_name_buf), "%.*s",
+                           column_name.length(), column_name.ptr());
+  if (name_len <= 0 || name_len >= static_cast<int>(sizeof(column_name_buf))) {
+    return ret;
+  }
+  const share::schema::ObColumnSchemaV2 *col_schema = table_schema->get_column_schema(column_name_buf);
+  if (OB_ISNULL(col_schema) || col_schema->is_hidden()) {
+    return ret;
+  }
+  // an AI column owns a hidden <column>__ai_request column
+  char ai_request_column[OB_MAX_COLUMN_NAME_LENGTH + 32];
+  int ai_name_len = snprintf(ai_request_column, sizeof(ai_request_column), "%s__ai_request",
+                              column_name_buf);
+  if (ai_name_len <= 0 || ai_name_len >= static_cast<int>(sizeof(ai_request_column))) {
+    return ret;
+  }
+  if (OB_ISNULL(table_schema->get_column_schema(ai_request_column))) {
+    // not an AI column
+    return ret;
+  }
+  // it is an AI column: it is readable only when every one of its rows
+  // holds a finished result
+  if (oceanbase::sql::ai_column_task_has_not_ready(table_id, col_schema->get_column_id())) {
+    ret = OB_AI_COLUMN_NOT_READY;
+    LOG_USER_ERROR(OB_AI_COLUMN_NOT_READY,
+                   static_cast<int64_t>(table_id),
+                   static_cast<int64_t>(col_schema->get_column_id()));
+  }
+  return ret;
+}
