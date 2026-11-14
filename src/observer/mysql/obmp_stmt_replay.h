@@ -61,6 +61,7 @@ public:
         fields_(),
         sql_(),
         db_(),
+        owner_sid_(0),
         row_blob_(NULL),
         row_len_(0),
         eof_field_count_(0),
@@ -72,9 +73,11 @@ public:
     common::ObArenaAllocator alloc_;
     // Column definitions exactly as the packet sender consumed them.
     common::ObSEArray<obmysql::ObMySQLField, LOCAL_FIELD_SLOTS> fields_;
-    // Statement key: the request text and the current database at capture time.
+    // Statement key: the request text, the current database and the session
+    // that produced the bytes.
     common::ObString sql_;
     common::ObString db_;
+    uint32_t owner_sid_;
     // Packed row payload, in the blob format of nio_encode_mysql_packed_row_blob.
     const char *row_blob_;
     int64_t row_len_;
@@ -93,8 +96,11 @@ public:
   // Opens the statement. Returns true when the cached response must be replayed,
   // in which case the slot has already been refreshed. Otherwise the slot is
   // cleared and, when the statement is cacheable, a capture is armed.
+  // The response bytes depend on the session that produced them (result charset,
+  // sql mode, ...), so the session id is part of the key as well.
   bool begin_stmt(const common::ObString &sql,
                   const common::ObString &db,
+                  const uint32_t session_id,
                   const bool cacheable);
 
   bool is_hit() const { return hit_; }
@@ -269,10 +275,12 @@ private:
   // Borrowed request owned pointers, valid only until commit_capture().
   common::ObString pending_sql_;
   common::ObString pending_db_;
+  uint32_t pending_owner_sid_ = 0;
 };
 
 inline bool ObMPStmtReplay::begin_stmt(const common::ObString &sql,
                                        const common::ObString &db,
+                                       const uint32_t session_id,
                                        const bool cacheable)
 {
   bool hit = false;
@@ -283,6 +291,7 @@ inline bool ObMPStmtReplay::begin_stmt(const common::ObString &sql,
   } else {
     const int64_t now = now_us();
     if (entry_.valid_
+        && entry_.owner_sid_ == session_id
         && (now - entry_.stamp_us_) < STAY_US
         && same_string(entry_.sql_, sql)
         && same_string(entry_.db_, db)) {
@@ -294,6 +303,7 @@ inline bool ObMPStmtReplay::begin_stmt(const common::ObString &sql,
       if (is_cacheable_text(sql)) {
         pending_sql_ = sql;
         pending_db_ = db;
+        pending_owner_sid_ = session_id;
         capturing_ = true;
       } else {
         ++stat_not_cacheable_;
@@ -387,6 +397,7 @@ inline void ObMPStmtReplay::commit_capture(const bool ok)
       } else {
         entry_.sql_ = sql_copy;
         entry_.db_ = db_copy;
+        entry_.owner_sid_ = pending_owner_sid_;
         entry_.stamp_us_ = now_us();
         entry_.valid_ = true;
         ++stat_stored_;

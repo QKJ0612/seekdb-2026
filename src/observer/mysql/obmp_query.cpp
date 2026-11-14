@@ -362,6 +362,7 @@ int ObMPQuery::process_single_stmt(const ObMultiStmtItem &multi_stmt_item,
                                 && !session.is_in_transaction();
   if (stmt_replay.begin_stmt(multi_stmt_item.get_sql(),
                              session.get_database_name(),
+                             session.get_server_sid(),
                              replay_candidate)) {
     ret = replay_cached_response(session, has_more_result);
     if (OB_FAIL(ret)) {
