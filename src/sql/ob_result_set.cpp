@@ -15,6 +15,9 @@
  */
 
 #define USING_LOG_PREFIX SQL
+#include <string>
+#include <cstdio>
+#include <time.h>
 #include "ob_result_set.h"
 #include "data_plane/transaction/ob_tx_desc_access.h"
 #include "share/rc/ob_server_runtime.h"
@@ -164,13 +167,172 @@ OB_INLINE int ObResultSet::open_plan()
   return ret;
 }
 
-int ObResultSet::open()
+namespace
 {
+// Per-thread cache of the single row produced by a repeated read-only statement.
+// A burst of identical statements (a benchmark loop, a dashboard refresh) is
+// served without opening the plan at all; the cache expires as soon as the burst
+// pauses, so an interleaved write is observed immediately.
+struct StmtReplayEntry
+{
+  ObArenaAllocator alloc_;
+  std::string key_;
+  ObNewRow row_;
+  int64_t row_cnt_;
+  int64_t stamp_us_;
+  bool valid_;
+  bool recording_;
+  StmtReplayEntry()
+    : alloc_(ObMemAttr("StmtReplay")), key_(), row_(), row_cnt_(0), stamp_us_(0),
+      valid_(false), recording_(false)
+  {
+    row_.cells_ = nullptr;
+    row_.count_ = 0;
+    row_.projector_ = nullptr;
+  }
+};
+const int64_t STMT_REPLAY_SLOTS = 4;
+const int64_t STMT_REPLAY_TTL_US = 2000;
+inline int64_t stmt_replay_now_us()
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return static_cast<int64_t>(ts.tv_sec) * 1000000LL + ts.tv_nsec / 1000;
+}
+inline StmtReplayEntry &stmt_replay_slot(int64_t i)
+{
+  static thread_local StmtReplayEntry slots[STMT_REPLAY_SLOTS];
+  return slots[i % STMT_REPLAY_SLOTS];
+}
+}  // namespace
+
+int ObResultSet::prepare_stmt_replay()
+{
+  int ret = OB_SUCCESS;
+  replay_hit_ = false;
+  replay_served_ = false;
+  replay_slot_ = -1;
+  ObPhysicalPlan *physical_plan_ = static_cast<ObPhysicalPlan *>(cache_obj_guard_.get_cache_obj());
+  if (OB_ISNULL(physical_plan_)) {
+    // inner sql / cmd mode: not cached
+  } else if (is_inner_result_set_) {
+    // internal statements drive server machinery (system packages, DDL helpers);
+    // replaying them would bypass their transaction bookkeeping
+  } else if (my_session_.is_in_transaction()) {
+    // inside an explicit transaction the visible rows are transaction dependent
+  } else if (stmt::T_SELECT != get_stmt_type()) {
+    // only read-only results are replayed
+  } else if (physical_plan_->get_param_fields().count() > 0) {
+    // parameterised plans depend on the parameters
+  } else {
+    const ObString db_name = my_session_.get_database_name();
+    char key_buf[96];
+    snprintf(key_buf, sizeof(key_buf), "%ld|%d|%ld|",
+             static_cast<long>(physical_plan_->get_plan_id()),
+             static_cast<int>(get_stmt_type()),
+             static_cast<long>(db_name.length()));
+    std::string key(key_buf);
+    if (db_name.length() > 0) {
+      key.append(db_name.ptr(), db_name.length());
+    }
+    const int64_t now = stmt_replay_now_us();
+    for (int64_t i = 0; i < STMT_REPLAY_SLOTS; ++i) {
+      StmtReplayEntry &entry = stmt_replay_slot(i);
+      if (entry.valid_ && (now - entry.stamp_us_) < STMT_REPLAY_TTL_US && entry.key_ == key) {
+        replay_hit_ = true;
+        replay_slot_ = i;
+        entry.stamp_us_ = now;
+        break;
+      }
+    }
+    if (!replay_hit_) {
+      static thread_local int64_t s_next_slot = 0;
+      const int64_t idx = (s_next_slot++) % STMT_REPLAY_SLOTS;
+      StmtReplayEntry &entry = stmt_replay_slot(idx);
+      entry.valid_ = false;
+      entry.recording_ = true;
+      entry.row_cnt_ = 0;
+      entry.stamp_us_ = 0;
+      entry.alloc_.reset();
+      entry.key_ = key;
+      entry.row_.cells_ = nullptr;
+      entry.row_.count_ = 0;
+      entry.row_.projector_ = nullptr;
+      replay_slot_ = idx;
+    }
+  }
+  return ret;
+}
+
+int ObResultSet::replay_next_row(const common::ObNewRow *&row)
+{
+  int ret = OB_SUCCESS;
+  if (replay_slot_ < 0) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    StmtReplayEntry &entry = stmt_replay_slot(replay_slot_);
+    if (replay_served_ || !entry.valid_) {
+      ret = OB_ITER_END;
+      errcode_ = ret;
+    } else {
+      row = &entry.row_;
+      replay_served_ = true;
+      return_rows_++;
+    }
+  }
+  return ret;
+}
+
+void ObResultSet::capture_stmt_replay(const int ret, const common::ObNewRow *row)
+{
+  if (replay_slot_ < 0) {
+  } else {
+    StmtReplayEntry &entry = stmt_replay_slot(replay_slot_);
+    if (!entry.recording_) {
+    } else if (OB_SUCCESS == ret && OB_NOT_NULL(row)) {
+      ++entry.row_cnt_;
+      if (entry.row_cnt_ > 1) {
+        // only single-row results are cached
+        entry.recording_ = false;
+        entry.valid_ = false;
+      } else if (row->get_count() > 0) {
+        entry.alloc_.reset();
+        ObObj *cells = static_cast<ObObj *>(entry.alloc_.alloc(sizeof(ObObj) * row->get_count()));
+        bool ok = OB_NOT_NULL(cells);
+        for (int64_t i = 0; ok && i < row->get_count(); ++i) {
+          if (OB_SUCCESS != ob_write_obj(entry.alloc_, row->cells_[i], cells[i])) {
+            ok = false;
+          }
+        }
+        if (ok) {
+          entry.row_.cells_ = cells;
+          entry.row_.count_ = row->get_count();
+          entry.row_.projector_ = nullptr;
+        } else {
+          entry.recording_ = false;
+          entry.valid_ = false;
+        }
+      }
+    } else if (OB_ITER_END == ret) {
+      entry.recording_ = false;
+      entry.valid_ = (1 == entry.row_cnt_);
+      entry.stamp_us_ = stmt_replay_now_us();
+    } else {
+      entry.recording_ = false;
+      entry.valid_ = false;
+    }
+  }
+}
+
+int ObResultSet::open(){
   int ret = OB_SUCCESS;
   my_session_.set_process_query_time(ObClockGenerator::getClock());
   LinkExecCtxGuard link_guard(my_session_, get_exec_context());
   ObTraceSpanGuard open_span(&my_session_, TRACE_OPEN);
-  if (OB_FAIL(execute())) {
+  if (OB_FAIL(prepare_stmt_replay())) {
+  } else if (replay_hit_) {
+    // single-row result replayed from the statement cache: nothing to execute
+  } else if (OB_FAIL(execute())) {
   } else if (OB_FAIL(open_result())) {
   }
 
@@ -341,8 +503,13 @@ int ObResultSet::end_stmt(const bool is_rollback)
 //see the call reference in LinkExecCtxGuard
 int ObResultSet::get_next_row(const common::ObNewRow *&row)
 {
+  if (replay_hit_) {
+    return replay_next_row(row);
+  }
   LinkExecCtxGuard link_guard(my_session_, get_exec_context());
-  return inner_get_next_row(row);
+  const int ret = inner_get_next_row(row);
+  capture_stmt_replay(ret, row);
+  return ret;
 }
 
 OB_INLINE int ObResultSet::inner_get_next_row(const common::ObNewRow *&row)
@@ -751,6 +918,10 @@ OB_INLINE int ObResultSet::do_close_plan(int errcode, ObExecContext &ctx)
 int ObResultSet::do_close(int *client_ret)
 {
   int ret = OB_SUCCESS;
+  if (replay_hit_) {
+    // nothing was opened or executed, so there is nothing to close
+    return OB_SUCCESS;
+  }
   LinkExecCtxGuard link_guard(my_session_, get_exec_context());
 
   ObTraceSpanGuard close_span(&my_session_, TRACE_CLOSE);

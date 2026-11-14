@@ -342,6 +342,9 @@ private:
   int open_result();
   int do_open_plan(ObExecContext &ctx);
   int do_close_plan(int errcode, ObExecContext &ctx);
+  int prepare_stmt_replay();
+  int replay_next_row(const common::ObNewRow *&row);
+  void capture_stmt_replay(const int ret, const common::ObNewRow *row);
   int deal_feedback_info(ObPhysicalPlan *physical_plan, bool is_rollback, ObExecContext &ctx);
   bool transaction_set_violation_and_retry(int &err, int64_t &retry);
   int init_cmd_exec_context(ObExecContext &exec_ctx);
@@ -403,6 +406,10 @@ private:
   char external_retrieve_info_buf_[sizeof(ExternalRetrieveInfo)];
   ExternalRetrieveInfo &external_retrieve_info_;
   bool compound_;
+  // Single-row statement result replay (see ob_result_set.cpp)
+  bool replay_hit_ = false;
+  bool replay_served_ = false;
+  int64_t replay_slot_ = -1;
   bool has_global_variable_; // indicates that it contains a global variable, used in conjunction with stmt_type_ being T_VARIABLE_SET
   /* ob_sql.h is the interface for the SQL module, external parties do not need to understand ObExecContext
    * Therefore, exec_ctx_ is made a member of ObResultSet without exposing it outside of SQL
