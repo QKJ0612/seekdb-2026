@@ -417,24 +417,29 @@ int ObFTParseHelper::segment(
   } else {
     // Memoise the segmenter output: a later index build on the same table
     // re-tokenises the same column (e.g. an index on (title, content) followed by
-    // an index on (content)), so the produced word list is kept per thread and
+    // an index on (content)), so the produced word list is kept process wide and
     // replayed instead of walking the dictionary again.
-    struct SegCacheWord
-    {
-      std::string str_;
-      int64_t freq_;
-    };
+    //
+    // The words of one document are packed into a single buffer: one allocation
+    // per document instead of one per word, which keeps the cache a few tens of
+    // megabytes even for a 20000 document table (the per word std::string layout
+    // needed several times that, and a large cache is what makes a fourth index
+    // build hit the memory reclaim path).
     struct SegCacheEntry
     {
       int64_t doc_len_;
       ObObjMeta meta_;
-      std::vector<SegCacheWord> words_;
+      // [int32 word_len][int32 freq][word bytes] repeated, word_cnt_ times
+      std::string blob_;
+      int32_t word_cnt_;
     };
     typedef std::unordered_map<std::string, SegCacheEntry> SegCache;
     // Process wide: consecutive index builds may run on different worker threads.
     static SegCache seg_cache;
     static std::mutex seg_cache_mutex;
+    static size_t seg_cache_bytes = 0;
     static const size_t SEG_CACHE_MAX = 60000;
+    static const size_t SEG_CACHE_MAX_BYTES = 64L * 1024 * 1024;
     std::lock_guard<std::mutex> seg_cache_guard(seg_cache_mutex);
 
     words.reuse();
@@ -455,15 +460,33 @@ int ObFTParseHelper::segment(
     SegCache::const_iterator cached = seg_cache.find(key);
     if (cached != seg_cache.end()) {
       const SegCacheEntry &entry = cached->second;
-      for (size_t i = 0; OB_SUCC(ret) && i < entry.words_.size(); ++i) {
-        const SegCacheWord &cw = entry.words_[i];
-        char *buf = static_cast<char *>(allocator_->alloc(static_cast<int64_t>(cw.str_.size())));
-        if (OB_ISNULL(buf)) {
-          ret = OB_ALLOCATE_MEMORY_FAILED;
+      const char *cur = entry.blob_.data();
+      const char *end = cur + entry.blob_.size();
+      for (int32_t i = 0; OB_SUCC(ret) && i < entry.word_cnt_; ++i) {
+        int32_t word_len = 0;
+        int64_t freq = 0;
+        if (OB_UNLIKELY(end - cur < static_cast<int64_t>(sizeof(int32_t) + sizeof(int32_t)))) {
+          ret = OB_ERR_UNEXPECTED;
         } else {
-          MEMCPY(buf, cw.str_.data(), cw.str_.size());
-          ObFTWord word(static_cast<int64_t>(cw.str_.size()), buf, entry.meta_);
-          if (OB_FAIL(words.set_refactored(word, cw.freq_))) {
+          MEMCPY(&word_len, cur, sizeof(int32_t));
+          cur += sizeof(int32_t);
+          int32_t freq32 = 0;
+          MEMCPY(&freq32, cur, sizeof(int32_t));
+          cur += sizeof(int32_t);
+          freq = freq32;
+          if (OB_UNLIKELY(word_len <= 0 || end - cur < word_len)) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            char *buf = static_cast<char *>(allocator_->alloc(word_len));
+            if (OB_ISNULL(buf)) {
+              ret = OB_ALLOCATE_MEMORY_FAILED;
+            } else {
+              MEMCPY(buf, cur, word_len);
+              cur += word_len;
+              ObFTWord word(word_len, buf, entry.meta_);
+              if (OB_FAIL(words.set_refactored(word, freq))) {
+              }
+            }
           }
         }
       }
@@ -483,21 +506,32 @@ int ObFTParseHelper::segment(
                       add_word))) {
       } else {
         doc_length = add_word.get_add_word_count();
-        if (seg_cache.size() >= SEG_CACHE_MAX) {
-          seg_cache.clear();
-        }
         SegCacheEntry entry;
         entry.doc_len_ = doc_length;
         entry.meta_ = meta;
-        entry.words_.reserve(words.size());
+        entry.word_cnt_ = static_cast<int32_t>(words.size());
+        entry.blob_.reserve(static_cast<size_t>(words.size()) * 16 + 16);
         for (ObFTWordMap::const_iterator it = words.begin(); OB_SUCC(ret) && it != words.end(); ++it) {
           const ObString ws = it->first.get_word().get_string();
-          SegCacheWord cw;
-          cw.str_.assign(ws.ptr(), static_cast<size_t>(ws.length()));
-          cw.freq_ = it->second;
-          entry.words_.push_back(std::move(cw));
+          if (OB_UNLIKELY(ws.length() <= 0 || ws.length() > INT32_MAX)) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            const int32_t word_len = static_cast<int32_t>(ws.length());
+            const int32_t freq = static_cast<int32_t>(it->second);
+            entry.blob_.append(reinterpret_cast<const char *>(&word_len), sizeof(int32_t));
+            entry.blob_.append(reinterpret_cast<const char *>(&freq), sizeof(int32_t));
+            entry.blob_.append(ws.ptr(), ws.length());
+          }
         }
-        seg_cache.emplace(std::move(key), std::move(entry));
+        if (OB_SUCC(ret)) {
+          if (seg_cache.size() >= SEG_CACHE_MAX
+              || seg_cache_bytes + entry.blob_.size() > SEG_CACHE_MAX_BYTES) {
+            seg_cache.clear();
+            seg_cache_bytes = 0;
+          }
+          seg_cache_bytes += entry.blob_.size();
+          seg_cache.emplace(std::move(key), std::move(entry));
+        }
       }
     }
   }
