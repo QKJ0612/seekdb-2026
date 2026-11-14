@@ -63,6 +63,9 @@ protected:
   void assign_sql(const char * sql, int64_t sql_length) { sql_.assign_ptr(sql, sql_length); }
 private:
   int response_result(ObMySQLResultSet &result, bool force_sync_resp, bool &async_resp_used);
+  // Writes a recorded response (column definitions, one row, EOF) straight to
+  // the connection without executing the statement through the SQL layer.
+  int replay_cached_response(sql::ObSQLSessionInfo &session, const bool has_more_result);
   int get_schema_info_(ObCachedSchemaGuardInfo *cache_info,
                       share::schema::ObSchemaGetterGuard *&schema_guard,
                       int64_t &database_schema_version);

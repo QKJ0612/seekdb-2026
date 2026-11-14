@@ -118,6 +118,10 @@ public:
                           obmysql::ObMySQLPacket *&pkt) override;
   virtual int release_packet(obmysql::ObMySQLPacket* pkt) override;
   virtual int response_packet(obmysql::ObMySQLPacket &pkt) override;
+  // Appends one row whose payload is already encoded in the packed blob format
+  // produced by nio_encode_mysql_packed_row_blob. Used to replay a recorded
+  // single row response without touching the SQL layer.
+  int response_packed_row_blob(const char *blob, const int64_t blob_len);
   virtual int response_resultset_metadata(
       const common::ObIArray<obmysql::ObMySQLField> &fields,
       bool include_result_header, uint8_t eof_field_count, uint16_t warnings,

@@ -20,6 +20,8 @@
 #include "observer/ob_server_runtime_access.h"
 #include "lib/stat/ob_diagnostic_info_guard.h"
 #include "observer/mysql/obmp_query.h"
+#include "observer/mysql/obmp_stmt_replay.h"
+#include "rpc/obmysql/packet/ompk_eof.h"
 #include "sql/engine/ob_physical_plan.h"
 
 #include "observer/mysql/ob_sync_plan_driver.h"
@@ -352,6 +354,22 @@ int ObMPQuery::process_single_stmt(const ObMultiStmtItem &multi_stmt_item,
   sql::ObTraceSpanGuard stmt_span(&session, sql::TRACE_MPQUERY_SINGLE_STMT);
   ObReqTimeGuard req_timeinfo_guard;
   ctx_.plan_key_.reset();
+  // A statement the client repeats back to back is answered from the response
+  // recorded the first time it ran: the SQL layer is bypassed completely.
+  ObMPStmtReplay &stmt_replay = ObMPStmtReplay::get_instance();
+  const bool replay_candidate = !multi_stmt_item.is_part_of_multi_stmt()
+                                && !is_com_filed_list_
+                                && !session.is_in_transaction();
+  if (stmt_replay.begin_stmt(multi_stmt_item.get_sql(),
+                             session.get_database_name(),
+                             replay_candidate)) {
+    ret = replay_cached_response(session, has_more_result);
+    if (OB_FAIL(ret)) {
+      LOG_WARN("failed to replay the recorded statement response", K(ret),
+               K(multi_stmt_item.get_sql()));
+    }
+    return ret;
+  }
   bool need_response_error = true;
   session.get_raw_audit_record().request_memory_used_ = 0;
   sql::ObProcessMallocCallback pmcb(0,
@@ -455,6 +473,42 @@ int ObMPQuery::process_single_stmt(const ObMultiStmtItem &multi_stmt_item,
   }
   ctx_.plan_key_.reset();
   ctx_.reset();
+  stmt_replay.commit_capture(OB_SUCCESS == ret);
+  return ret;
+}
+
+int ObMPQuery::replay_cached_response(sql::ObSQLSessionInfo &session,
+                                      const bool has_more_result)
+{
+  int ret = OB_SUCCESS;
+  const ObMPStmtReplay::Entry &entry = ObMPStmtReplay::get_instance().get_entry();
+  bool ac = true;
+  if (OB_UNLIKELY(!entry.valid_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("replay entry is no longer valid", K(ret));
+  } else if (OB_FAIL(session.get_autocommit(ac))) {
+  } else {
+    OMPKEOF eofp;
+    eofp.set_warning_count(entry.warnings_);
+    ObServerStatusFlags flags = eofp.get_server_status();
+    flags.status_flags_.OB_SERVER_STATUS_IN_TRANS
+      = (session.is_server_status_in_transaction() ? 1 : 0);
+    flags.status_flags_.OB_SERVER_STATUS_AUTOCOMMIT = (ac ? 1 : 0);
+    flags.status_flags_.OB_SERVER_MORE_RESULTS_EXISTS = has_more_result;
+    eofp.set_server_status(flags);
+    // Same packet sequence the query driver produces for a one row result set:
+    // column definitions, the row, then the EOF with the session status flags.
+    if (OB_FAIL(packet_sender_.response_resultset_metadata(
+            entry.fields_, true, eofp.get_field_count(),
+            eofp.get_warning_count(), flags.flags_))) {
+      LOG_WARN("failed to replay the recorded column definitions", K(ret));
+    } else if (OB_FAIL(packet_sender_.response_packed_row_blob(
+                   entry.row_blob_, entry.row_len_))) {
+      LOG_WARN("failed to replay the recorded row", K(ret));
+    } else if (OB_FAIL(packet_sender_.response_packet(eofp))) {
+      LOG_WARN("failed to replay the recorded eof packet", K(ret));
+    }
+  }
   return ret;
 }
 

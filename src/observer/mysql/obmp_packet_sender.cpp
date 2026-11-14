@@ -19,6 +19,7 @@
 #include "query/protocol/ob_mysql_packet_sender.h"
 #include "nio.h"
 #include "observer/mysql/ob_mysql_result_set.h"
+#include "observer/mysql/obmp_stmt_replay.h"
 #include "query/protocol/ob_mysql_rust_row.h"
 #include "observer/mysql/obmp_utils.h"
 #include "rpc/ob_sql_request_operator.h"
@@ -177,6 +178,80 @@ OB_NOINLINE int encode_row_packet(const OMPKRow &row_packet,
     }
   }
   return frame_ret;
+}
+
+// Encode the payload of one row into the packed blob format that
+// nio_response_append_packed_row_blob replays. Returns an error instead of a
+// truncated blob when the row does not fit the replay buffer.
+OB_NOINLINE int encode_row_replay_blob(const ObMySQLRow &row,
+                                       ObIAllocator &alloc,
+                                       const char *&blob,
+                                       int64_t &blob_len) {
+  const int64_t REPLAY_ROW_BUF_SIZE = 16 * 1024;
+  int ret = OB_SUCCESS;
+  char *buffer = NULL;
+  blob = NULL;
+  blob_len = 0;
+  if (row.is_packed()) {
+    if (OB_FAIL(row.get_packed_row_blob(blob, blob_len))) {
+    }
+  } else {
+    const int64_t cell_count = row.get_cells_count();
+    if (OB_UNLIKELY(cell_count <= 0)) {
+      ret = OB_INVALID_ARGUMENT;
+    } else if (OB_ISNULL(buffer = static_cast<char *>(alloc.alloc(REPLAY_ROW_BUF_SIZE)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      ObSEArray<ObMySQLCellValue, 16> values;
+      ObSEArray<NioMysqlCellView, 16> views;
+      if (OB_FAIL(values.prepare_allocate(cell_count))) {
+      } else if (OB_FAIL(views.prepare_allocate(cell_count))) {
+      } else {
+        for (int64_t i = 0; OB_SUCC(ret) && i < cell_count; ++i) {
+          if (OB_FAIL(row.build_cell_value(i, alloc, values.at(i)))) {
+          } else if (OB_FAIL(query::build_nio_mysql_cell_view(values.at(i), views.at(i)))) {
+          }
+        }
+        if (OB_SUCC(ret)) {
+          NioMysqlRowView view = {};
+          int64_t encoded_len = 0;
+          view.cells = &views.at(0);
+          view.cell_count = views.count();
+          if (OB_FAIL(query::get_nio_mysql_row_protocol(row.get_protocol_type(), view.protocol))) {
+          } else if (0 != nio_encode_mysql_packed_row_blob(
+                              buffer, REPLAY_ROW_BUF_SIZE, &view, &encoded_len)) {
+            ret = OB_SIZE_OVERFLOW;
+          } else if (OB_UNLIKELY(encoded_len <= 0)) {
+            ret = OB_ERR_UNEXPECTED;
+          } else {
+            blob = buffer;
+            blob_len = encoded_len;
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+// Record the row of an armed statement into the statement replay cache. Only
+// the first row is encoded: a second row disqualifies the statement.
+OB_NOINLINE void capture_replay_row(const ObMySQLRow &row) {
+  ObMPStmtReplay &replay = ObMPStmtReplay::get_instance();
+  if (!replay.is_capturing()) {
+    // this statement is not being recorded
+  } else if (!replay.wants_row()) {
+    (void)replay.capture_row(NULL, 0);
+  } else {
+    ObArenaAllocator alloc(ObMemAttr("MPStmtReplayRow"));
+    const char *blob = NULL;
+    int64_t blob_len = 0;
+    if (OB_SUCCESS != encode_row_replay_blob(row, alloc, blob, blob_len)) {
+      blob = NULL;
+      blob_len = 0;
+    }
+    (void)replay.capture_row(blob, blob_len);
+  }
 }
 
 int append_ok_kv_views(const ObIArray<ObStringKV> &source,
@@ -518,10 +593,41 @@ int ObMPPacketSender::response_resultset_metadata(
       if (0 != append_ret) {
         ret = OB_ERR_UNEXPECTED;
       } else {
+        ObMPStmtReplay &replay = ObMPStmtReplay::get_instance();
+        if (replay.is_capturing()) {
+          if (include_result_header) {
+            (void)replay.capture_metadata(fields, eof_field_count, warnings);
+          } else {
+            replay.deny_capture();
+          }
+        }
       }
     }
   }
 
+  return ret;
+}
+
+int ObMPPacketSender::response_packed_row_blob(const char *blob,
+                                               const int64_t blob_len) {
+  int ret = OB_SUCCESS;
+  int64_t framed_len = 0;
+  if (!is_conn_valid()) {
+    ret = OB_CONNECT_ERROR;
+  } else if (OB_UNLIKELY(RequestOwnership::OWNED != request_ownership_) ||
+             OB_ISNULL(req_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_ERROR("request ownership has been released", K(ret), KP_(req));
+  } else if (OB_ISNULL(blob) || blob_len <= 0) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    response_started_ = true;
+    if (0 != nio_response_append_packed_row_blob(nio_connection_handle_,
+                                                 request_generation_, blob,
+                                                 blob_len, &framed_len)) {
+      ret = OB_ERR_UNEXPECTED;
+    }
+  }
   return ret;
 }
 
@@ -1010,9 +1116,13 @@ int ObMPPacketSender::append_response(ObMySQLPacket &pkt, int64_t &seri_size) {
         break;
       }
       case ObMySQLPacketType::PKT_ROW: {
-        append_ret = encode_row_packet(static_cast<const OMPKRow &>(pkt),
-                                       connection_handle, request_generation_,
-                                       &seri_size, encode_ret);
+        const OMPKRow &row_packet = static_cast<const OMPKRow &>(pkt);
+        append_ret = encode_row_packet(row_packet, connection_handle,
+                                       request_generation_, &seri_size,
+                                       encode_ret);
+        if (OB_SUCCESS == encode_ret && 0 == append_ret) {
+          capture_replay_row(row_packet.get_row());
+        }
         break;
       }
       case ObMySQLPacketType::PKT_OKP: {
